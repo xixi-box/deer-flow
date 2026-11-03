@@ -25,6 +25,14 @@ dependencies = [
     "langchain-anthropic>=1.4.1",
     "langchain-deepseek>=1.0.1",
     "langchain-mcp-adapters>=0.2.2",
+    # langchain-mcp-adapters declares only mcp>=1.9.2, so a project that also
+    # installs another MCP package (for example fastmcp) can resolve mcp 2.x.
+    # The harness and the adapter are both written against the 1.x API: mcp 2
+    # renamed McpError to MCPError and removed mcp.server.fastmcp and
+    # streamablehttp_client, which breaks Gateway startup at import time.
+    # State the supported major version here rather than inheriting an
+    # unbounded requirement through the adapter.
+    "mcp>=1.30.0,<2",
     "langchain-openviking==0.1.0",
     "langchain-openai>=1.2.1",
     "langfuse>=3.4.1",
