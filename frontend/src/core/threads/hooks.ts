@@ -30,6 +30,7 @@ import { getBackendBaseURL } from "../config";
 import { useRunInputsEnabled } from "../features";
 import { useI18n } from "../i18n/hooks";
 import type { Locale } from "../i18n/locale";
+import type { Translations } from "../i18n/locales";
 import { getMessageRunId, parseRunStartTime } from "../messages/run-duration";
 import { isErrorToolMessage } from "../messages/tool-error";
 import { indexToolResults } from "../messages/tool-result";
@@ -1911,7 +1912,25 @@ export async function stopThreadAndInvalidateCaches(
   }
 }
 
-function getStreamErrorMessage(error: unknown): string {
+const HTTP_STATUS_MESSAGE_PATTERN = /^HTTP\s+(\d{3})(?:\b|$)/i;
+
+function parseHttpStatusFromMessage(message: unknown): number | undefined {
+  if (typeof message !== "string") {
+    return undefined;
+  }
+  const match = HTTP_STATUS_MESSAGE_PATTERN.exec(message.trim());
+  if (!match?.[1]) {
+    return undefined;
+  }
+  const status = Number(match[1]);
+  return Number.isFinite(status) ? status : undefined;
+}
+
+function getStreamErrorMessage(error: unknown, t: Translations): string {
+  const status = getHttpStatus(error);
+  if (status !== undefined && status >= 500) {
+    return t.conversation.streamServiceUnavailable(status);
+  }
   if (typeof error === "string" && error.trim()) {
     return error;
   }
@@ -1950,6 +1969,9 @@ async function readResponseErrorMessage(
 }
 
 function getHttpStatus(error: unknown): number | undefined {
+  if (typeof error === "string") {
+    return parseHttpStatusFromMessage(error);
+  }
   if (typeof error !== "object" || error === null) {
     return undefined;
   }
@@ -1967,7 +1989,7 @@ function getHttpStatus(error: unknown): number | undefined {
     }
   }
 
-  return undefined;
+  return parseHttpStatusFromMessage(Reflect.get(error, "message"));
 }
 
 function isThreadMissingError(error: unknown): boolean {
@@ -2342,7 +2364,7 @@ export function useThreadStream({
       pendingPreparedReplayRef.current = null;
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
-      toast.error(getStreamErrorMessage(error));
+      toast.error(getStreamErrorMessage(error, t));
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
@@ -3141,7 +3163,7 @@ export function useThreadStream({
             removeSetItems(current, preparedSupersededMessageIds),
           );
         }
-        toast.error(getStreamErrorMessage(error));
+        toast.error(getStreamErrorMessage(error, t));
         return false;
       } finally {
         sendInFlightRef.current = false;
@@ -3150,6 +3172,7 @@ export function useThreadStream({
     [
       context,
       locale,
+      t,
       humanMessageCount,
       persistedMessages,
       queryClient,

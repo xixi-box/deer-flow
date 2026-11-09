@@ -1326,6 +1326,7 @@ export interface Translations {
     branchCreated: string;
     branchFailed: string;
     streamReplayGap: string;
+    streamServiceUnavailable: (status: number) => string;
     outlineLabel: string;
     outlineAttachmentFallback: string;
   };

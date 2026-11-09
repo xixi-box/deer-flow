@@ -1633,6 +1633,8 @@ export const enUS: Translations = {
     branchFailed: "Failed to branch conversation.",
     streamReplayGap:
       "Some live updates expired. The conversation was restored from saved state.",
+    streamServiceUnavailable: (status) =>
+      `Service temporarily unavailable (HTTP ${status}). Please try again later.`,
     outlineLabel: "Conversation outline",
     outlineAttachmentFallback: "Image or file message",
   },
