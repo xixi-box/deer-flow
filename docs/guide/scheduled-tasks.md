@@ -33,6 +33,20 @@ Current MVP capabilities:
 
 Derived run summaries omit leading inline `<think>` reasoning before limiting the text, so a long thought does not replace the actual answer in previews or scheduled notices. Original response history and literal tags in the answer are unchanged; previously stored run summaries are not rewritten.
 
+### Enable subagents through the API
+
+Set `"subagent_enabled": true` when creating a task with
+`POST /api/scheduled-tasks`, or update an owned task with
+`PATCH /api/scheduled-tasks/{task_id}`. The setting is saved and applies to
+both scheduled occurrences and manual trials. Set it to `false` to disable
+delegation; omitting it on update keeps the saved setting.
+
+New tasks default to `false`, and tasks saved before this option was added
+continue to run without subagents. The selected agent's `allowed_subagents`
+policy and the configured subagent runtime limits still apply. Delegated work
+runs under the task owner's identity. This option is currently available through
+the API.
+
 **Filter execution history through the API**
 
 To inspect failures without downloading every successful occurrence, authenticated clients with `threads:read` can request `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0` for an owned task. The optional `status` accepts `queued`, `launching`, `running`, `success`, `failed`, `skipped`, `interrupted`, or `unmet`; these are occurrence statuses, so task statuses such as `completed` are invalid (422).

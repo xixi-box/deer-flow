@@ -105,6 +105,7 @@ class ScheduledTaskRepository:
     @staticmethod
     def _row_to_dict(row: ScheduledTaskRow) -> dict[str, Any]:
         data = row.to_dict(exclude={"last_occurrence_seq", "unmet_streak_after_seq"})
+        data["subagent_enabled"] = bool(data.get("subagent_enabled"))
         for key in _TIMESTAMP_KEYS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
@@ -148,6 +149,7 @@ class ScheduledTaskRepository:
         schedule_spec: dict[str, Any],
         timezone: str,
         next_run_at: datetime | None,
+        subagent_enabled: bool = False,
         origin_thread_id: str | None = None,
         goal_objective: str | None = None,
         max_runs: int | None = None,
@@ -178,6 +180,7 @@ class ScheduledTaskRepository:
             standing_notes=list(standing_notes) if standing_notes is not None else None,
             context_mode=context_mode,
             assistant_id=assistant_id,
+            subagent_enabled=subagent_enabled,
             title=title,
             prompt=prompt,
             schedule_type=schedule_type,

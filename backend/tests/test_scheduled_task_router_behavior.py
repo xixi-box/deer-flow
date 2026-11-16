@@ -1877,3 +1877,69 @@ async def test_missing_tasks_and_thread_relations_over_http(http):
     assert [(task["id"], task["thread_relation"]) for task in origin] == [("task-l", "origin")]
     assert [(task["id"], task["thread_relation"], task["thread_run"]["run_number"]) for task in run] == [("task-l", "run", 1)]
     assert run[0]["automatic_runs_used"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trigger", ["scheduled", "manual"])
+@pytest.mark.parametrize("enabled", [True, False, None], ids=["enabled", "disabled", "default"])
+async def test_saved_subagent_setting_reaches_scheduled_run_context(http, monkeypatch, trigger, enabled):
+    from app.gateway import services
+
+    captured = []
+
+    async def start_run(body, thread_id, request, **kwargs):
+        captured.append(body)
+        return SimpleNamespace(run_id="run-subagents", thread_id=thread_id)
+
+    monkeypatch.setattr(services, "start_run", start_run)
+    monkeypatch.setattr(services, "_resolve_scheduler_recursion_limit", lambda: 1000)
+    service = http.app.state.scheduled_task_service
+    service._launch_run = lambda **kwargs: services.launch_scheduled_thread_run(app=http.app, **kwargs)
+    payload = {
+        "title": "Research brief",
+        "prompt": "Research the release",
+        "schedule_type": "interval",
+        "schedule_spec": {"every_seconds": 3600},
+        "timezone": "UTC",
+    }
+    if enabled is not None:
+        payload["subagent_enabled"] = enabled
+    response = await http.client.post("/api/scheduled-tasks", json=payload)
+    assert response.status_code == 200, response.text
+    task_id = response.json()["id"]
+    task = await http.repo.get(task_id, user_id=OWNER)
+    if trigger == "scheduled":
+        await service.run_once(now=datetime.fromisoformat(task["next_run_at"]))
+    else:
+        result = await service.dispatch_task(task, now=datetime.now(UTC), trigger=trigger)
+        assert result["outcome"] == "launched", result
+    (body,) = captured
+    assert body.context.get("subagent_enabled", False) is (enabled is True)
+    assert body.context["non_interactive"] is True
+    assert body.context["user_id"] == OWNER
+    assert task.get("subagent_enabled", False) is (enabled is True)
+
+
+@pytest.mark.asyncio
+async def test_subagent_setting_can_be_enabled_and_disabled_without_changing_schedule(http):
+    response = await http.client.post(
+        "/api/scheduled-tasks",
+        json={
+            "title": "Research brief",
+            "prompt": "Research the release",
+            "schedule_type": "interval",
+            "schedule_spec": {"every_seconds": 3600},
+            "timezone": "UTC",
+        },
+    )
+    assert response.status_code == 200, response.text
+    task_id = response.json()["id"]
+    for enabled in (True, False):
+        response = await http.client.patch(f"/api/scheduled-tasks/{task_id}", json={"subagent_enabled": enabled})
+        assert response.status_code == 200, response.text
+        saved = await http.repo.get(task_id, user_id=OWNER)
+        assert saved.get("subagent_enabled") is enabled
+        response = await http.client.patch(f"/api/scheduled-tasks/{task_id}", json={"title": "Renamed"})
+        assert response.status_code == 200, response.text
+        assert response.json()["subagent_enabled"] is enabled
+        assert response.json()["schedule_spec"] == {"every_seconds": 3600}

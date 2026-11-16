@@ -152,6 +152,7 @@ class ScheduledTaskCreateRequest(BaseModel):
     # coded errors from the shared validation, never a FastAPI list detail.
     thread_id: ThreadId | None = None
     context_mode: str = "fresh_thread_per_run"
+    subagent_enabled: bool = False
     assistant_id: str | None = Field(default=None, min_length=1)
     title: str = Field(min_length=1)
     prompt: str = Field(min_length=1)
@@ -170,6 +171,7 @@ class ScheduledTaskCreateRequest(BaseModel):
 
 class ScheduledTaskUpdateRequest(BaseModel):
     context_mode: str | None = None
+    subagent_enabled: bool | None = None
     thread_id: ThreadId | None = None
     assistant_id: str | None = Field(default=None, min_length=1)
     title: str | None = Field(default=None, min_length=1)

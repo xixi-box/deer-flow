@@ -247,6 +247,7 @@ async def validate_scheduled_task_create(
         "thread_id": body.thread_id,
         "context_mode": body.context_mode,
         "assistant_id": assistant_id,
+        "subagent_enabled": getattr(body, "subagent_enabled", False),
         "title": body.title,
         "prompt": body.prompt,
         "stop_condition": stop_condition,
