@@ -236,6 +236,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # them, and role changes / authorization policy stay authoritative
             # because they were resolved fresh from the owning user above.
             permissions = [permission for permission in permissions if permission in pat_scopes]
+            from app.gateway.auth.pat import get_pat_route_scope
+
+            required_scope = get_pat_route_scope(request.method, get_request_route_path(request))
+            if required_scope is not None and required_scope not in permissions:
+                return JSONResponse(status_code=403, content={"detail": f"Permission denied: {required_scope}"})
         request.state.auth = AuthContext(user=user, permissions=permissions)
         token = set_current_user(user)
         try:

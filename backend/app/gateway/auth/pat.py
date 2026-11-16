@@ -36,28 +36,51 @@ PAT_ALLOWED_SCOPES: frozenset[str] = frozenset(
         "projects:read",
         "projects:write",
         "projects:delete",
+        "agents:read",
+        "agents:write",
+        "schedules:read",
+        "schedules:write",
+        "subagents:write",
     }
 )
 
-# Deliberately NOT in PAT_ALLOWED_SCOPES: the route permissions "memory:read",
-# "memory:write", "agents:read", and "agents:write" exist in authz
-# (they guard the memory/agent routers), but PATs stay on the thread/run
-# lifecycle only — _PAT_ROUTE_RULES default-denies the memory/agent routes
-# for PAT callers regardless of scopes, so admitting these scopes would not
-# even reach those routes. Opening them to PATs is a product decision that
-# must change all three of: this set, _PAT_ROUTE_RULES, and the API docs.
+# Memory and auth/configuration routes outside the explicit allowlist remain
+# session-only, even when their permission names exist in authz.
 
 PAT_MAX_NAME_LENGTH = 128
+
+# Configuration scopes are additional PAT constraints. Existing route guards
+# still enforce owner permissions, thread/run rights and the administrator role.
+_PAT_CONFIGURATION_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str], str], ...] = (
+    (frozenset({"GET"}), re.compile(r"^/api/agents$"), "agents:read"),
+    (frozenset({"POST"}), re.compile(r"^/api/agents$"), "agents:write"),
+    (frozenset({"GET"}), re.compile(r"^/api/agents/(?!check$)[^/]+$"), "agents:read"),
+    (frozenset({"PUT", "DELETE"}), re.compile(r"^/api/agents/[^/]+$"), "agents:write"),
+    (frozenset({"GET"}), re.compile(r"^/api/scheduled-tasks$"), "schedules:read"),
+    (frozenset({"POST"}), re.compile(r"^/api/scheduled-tasks$"), "schedules:write"),
+    (frozenset({"GET"}), re.compile(r"^/api/scheduled-tasks/(?!preview-cron$)[^/]+$"), "schedules:read"),
+    (frozenset({"PATCH", "DELETE"}), re.compile(r"^/api/scheduled-tasks/(?!preview-cron$)[^/]+$"), "schedules:write"),
+    (frozenset({"POST"}), re.compile(r"^/api/scheduled-tasks/[^/]+/(pause|resume|trigger)$"), "schedules:write"),
+    (frozenset({"GET", "POST"}), re.compile(r"^/api/subagents$"), "subagents:write"),
+    (frozenset({"PUT", "DELETE"}), re.compile(r"^/api/subagents/[^/]+$"), "subagents:write"),
+)
+
+
+def get_pat_route_scope(method: str, path: str) -> str | None:
+    """Return the extra configuration scope for an explicitly admitted route."""
+    normalized = path.rstrip("/") or "/"
+    return next((scope for methods, pattern, scope in _PAT_CONFIGURATION_ROUTE_RULES if method in methods and pattern.match(normalized)), None)
+
 
 # Default-deny route boundary for PAT callers (#5041 review P1-1): scope
 # intersection in AuthMiddleware only constrains routes that consult
 # ``request.state.auth.permissions`` (``@require_permission``). Authenticated
-# mutation routes without that decorator — memory deletion, agent creation,
-# credential switching, channel configuration — would otherwise accept a
+# mutation routes without that decorator — memory deletion, credential
+# switching, channel configuration — would otherwise accept a
 # PAT holding a single read scope. A route is reachable by PAT only when it
-# is explicitly listed here, and only together with the thread/run lifecycle
-# the v1 scopes govern; everything else answers 403 regardless of scopes.
+# is explicitly listed here; everything else answers 403 regardless of scopes.
 _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
+    *((methods, pattern) for methods, pattern, _scope in _PAT_CONFIGURATION_ROUTE_RULES),
     (frozenset({"POST"}), re.compile(r"^/api/threads$")),
     (frozenset({"POST"}), re.compile(r"^/api/threads/search$")),
     (frozenset({"GET", "PATCH", "DELETE"}), re.compile(r"^/api/threads/[^/]+$")),

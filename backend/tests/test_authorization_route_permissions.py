@@ -101,6 +101,9 @@ async def test_route_permissions_disabled_preserves_all_permissions(monkeypatch)
         Permissions.PROJECTS_READ,
         Permissions.PROJECTS_WRITE,
         Permissions.PROJECTS_DELETE,
+        Permissions.SCHEDULES_READ,
+        Permissions.SCHEDULES_WRITE,
+        Permissions.SUBAGENTS_WRITE,
     ]
     cached.assert_not_called()
 
@@ -124,6 +127,9 @@ async def test_route_permissions_use_async_provider_and_trusted_principal(monkey
         Permissions.PROJECTS_READ,
         Permissions.PROJECTS_WRITE,
         Permissions.PROJECTS_DELETE,
+        Permissions.SCHEDULES_READ,
+        Permissions.SCHEDULES_WRITE,
+        Permissions.SUBAGENTS_WRITE,
     ]
     assert [(request.resource, request.action, request.target) for request in provider.requests] == [
         ("route", "read", Permissions.THREADS_READ),
@@ -139,6 +145,9 @@ async def test_route_permissions_use_async_provider_and_trusted_principal(monkey
         ("route", "read", Permissions.PROJECTS_READ),
         ("route", "write", Permissions.PROJECTS_WRITE),
         ("route", "delete", Permissions.PROJECTS_DELETE),
+        ("route", "read", Permissions.SCHEDULES_READ),
+        ("route", "write", Permissions.SCHEDULES_WRITE),
+        ("route", "write", Permissions.SUBAGENTS_WRITE),
     ]
     principal = provider.requests[0].principal
     assert principal.user_id == "user-123"
@@ -168,6 +177,9 @@ async def test_route_permissions_fail_closed_denies_only_the_failed_permission(m
         Permissions.PROJECTS_READ,
         Permissions.PROJECTS_WRITE,
         Permissions.PROJECTS_DELETE,
+        Permissions.SCHEDULES_READ,
+        Permissions.SCHEDULES_WRITE,
+        Permissions.SUBAGENTS_WRITE,
     ]
 
 
@@ -192,6 +204,9 @@ async def test_route_permissions_fail_open_allows_the_failed_permission(monkeypa
         Permissions.PROJECTS_READ,
         Permissions.PROJECTS_WRITE,
         Permissions.PROJECTS_DELETE,
+        Permissions.SCHEDULES_READ,
+        Permissions.SCHEDULES_WRITE,
+        Permissions.SUBAGENTS_WRITE,
     ]
 
 
@@ -216,6 +231,9 @@ async def test_route_permissions_fail_open_allows_the_failed_permission(monkeypa
                 Permissions.PROJECTS_READ,
                 Permissions.PROJECTS_WRITE,
                 Permissions.PROJECTS_DELETE,
+                Permissions.SCHEDULES_READ,
+                Permissions.SCHEDULES_WRITE,
+                Permissions.SUBAGENTS_WRITE,
             ],
         ),
     ],

@@ -1470,7 +1470,7 @@ def validate_resolved_session_user(user, payload) -> AuthErrorCode | None:
     return None
 
 
-async def is_admin_user(request: Request) -> bool:
+async def is_admin_user(request: Request, *, pat_permission: str | None = None) -> bool:
     """Return whether the authenticated caller is an admin user.
 
     ``AuthMiddleware`` normally stamps ``request.state.user`` before the request
@@ -1484,13 +1484,14 @@ async def is_admin_user(request: Request) -> bool:
     per-router copies that previously existed in ``mcp``, ``channel_connections``
     and ``channels``.
     """
-    # PAT credentials never carry admin capability: no scope in the PAT
-    # universe grants it, so an admin's automation token must not unlock
-    # admin-only routes (skill installs, integration credentials, MCP config).
+    # PATs have no general admin capability. A router may explicitly opt into
+    # one narrow permission; the owner's current admin role is still required.
     from app.gateway.auth_disabled import AUTH_SOURCE_PAT
 
     if getattr(request.state, "auth_source", None) == AUTH_SOURCE_PAT:
-        return False
+        auth = getattr(request.state, "auth", None)
+        if pat_permission is None or pat_permission not in getattr(auth, "permissions", ()):
+            return False
     user = getattr(request.state, "user", None)
     if user is None:
         user = await get_current_user_from_request(request)
@@ -1498,14 +1499,14 @@ async def is_admin_user(request: Request) -> bool:
     return getattr(user, "system_role", None) == "admin"
 
 
-async def require_admin_user(request: Request, *, detail: str) -> None:
+async def require_admin_user(request: Request, *, detail: str, pat_permission: str | None = None) -> None:
     """Require the authenticated caller to be an admin user.
 
     ``detail`` is the route-specific 403 message. The shared predicate keeps
     read-side redaction and write authorization on the same admin definition.
     """
 
-    if not await is_admin_user(request):
+    if not await is_admin_user(request, pat_permission=pat_permission):
         raise HTTPException(status_code=403, detail=detail)
 
 

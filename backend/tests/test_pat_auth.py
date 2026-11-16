@@ -25,7 +25,7 @@ from app.gateway.authz import require_cancel_permission_if
 from app.gateway.csrf_middleware import CSRFMiddleware
 from app.gateway.routers.auth import router as auth_router
 from app.gateway.run_models import RunCreateRequest
-from deerflow.config.authorization_config import AuthorizationConfig
+from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.persistence.base import Base
 from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
 
@@ -815,3 +815,172 @@ def test_auth_disabled_mode_ignores_bearer_header(monkeypatch, tmp_path):
         response = disabled_client.get("/api/threads/whoami", headers={"Authorization": "Bearer dfp_garbage"})
     assert response.status_code == 200
     assert response.json()["auth_source"] == "auth_disabled"
+
+
+@pytest.fixture
+def configuration_client(client, pat_env, tmp_path, monkeypatch):
+    """Mount production configuration routers with isolated file/SQL stores."""
+    from app.gateway.routers import agents, scheduled_tasks, subagents
+    from deerflow.config.agents_api_config import load_agents_api_config_from_dict
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+
+    app, _repo, engine = pat_env
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr("deerflow.config.app_config._legacy_config_candidates", lambda: ())
+    config = AppConfig(sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+    set_app_config(config)
+    load_agents_api_config_from_dict({"enabled": True})
+    monkeypatch.setattr(scheduled_tasks, "get_config", lambda: config)
+    monkeypatch.setattr(scheduled_tasks, "is_scheduler_running", lambda _request: True)
+    app.state.scheduled_task_repo = ScheduledTaskRepository(async_sessionmaker(engine, expire_on_commit=False))
+    # fresh_thread_per_run schedules do not need a thread lookup.
+    app.state.thread_store = SimpleNamespace()
+    for router in (agents.router, scheduled_tasks.router, subagents.router):
+        app.include_router(router)
+    try:
+        yield client
+    finally:
+        load_agents_api_config_from_dict({})
+        reset_app_config()
+
+
+def _pat_headers(client, scopes, *, user_id="user-1"):
+    created = _create_pat(client, scopes=scopes, user_id=user_id)
+    client.cookies.clear()
+    return {"Authorization": f"Bearer {created['token']}"}
+
+
+def test_pat_configuration_automation(configuration_client):
+    """CI can provision agents, managed subagents and owner-scoped schedules."""
+    client = configuration_client
+    headers = _pat_headers(client, ["agents:read", "agents:write"])
+    created = client.post("/api/agents", json={"name": "ci-agent", "soul": "CI agent"}, headers=headers)
+    assert created.status_code == 201, created.text
+    assert client.get("/api/agents/ci-agent", headers=headers).json()["soul"] == "CI agent"
+    assert client.get("/api/agents", headers=headers).json()["agents"][0]["name"] == "ci-agent"
+    updated = client.put("/api/agents/ci-agent", json={"soul": "Updated"}, headers=headers)
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["soul"] == "Updated"
+    other = _pat_headers(client, ["agents:read"], user_id="user-2")
+    assert client.get("/api/agents/ci-agent", headers=other).status_code == 404
+    assert client.delete("/api/agents/ci-agent", headers=headers).status_code == 204
+
+    admin = _pat_headers(client, ["subagents:write"], user_id="admin-1")
+    body = {"name": "ci-worker", "description": "CI worker", "system_prompt": "Work"}
+    created = client.post("/api/subagents", json=body, headers=admin)
+    assert created.status_code == 201, created.text
+    listed = client.get("/api/subagents", headers=admin)
+    assert listed.status_code == 200, listed.text
+    assert any(item["name"] == "ci-worker" and item["system_prompt"] == "Work" for item in listed.json()["subagents"])
+    assert client.put("/api/subagents/ci-worker", json={"enabled": False}, headers=admin).status_code == 200
+    assert client.delete("/api/subagents/ci-worker", headers=admin).status_code == 204
+
+    schedules = _pat_headers(client, ["schedules:read", "schedules:write", "threads:read", "threads:write", "runs:create"])
+    body = {"title": "CI task", "prompt": "Work", "schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * *"}, "timezone": "UTC"}
+    created = client.post("/api/scheduled-tasks", json=body, headers=schedules)
+    assert created.status_code == 200, created.text
+    path = f"/api/scheduled-tasks/{created.json()['id']}"
+    assert client.get(path, headers=schedules).status_code == 200
+    assert len(client.get("/api/scheduled-tasks", headers=schedules).json()) == 1
+    assert client.patch(path, json={"title": "Updated"}, headers=schedules).status_code == 200
+    assert client.post(f"{path}/pause", headers=schedules).status_code == 200
+    assert client.post(f"{path}/resume", headers=schedules).status_code == 200
+    other = _pat_headers(client, ["schedules:read", "threads:read"], user_id="user-2")
+    assert client.get(path, headers=other).status_code == 404
+    assert client.delete(path, headers=schedules).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("scopes", "method", "path", "body", "permission"),
+    [
+        (["agents:read"], "POST", "/api/agents", {"name": "denied"}, "agents:write"),
+        (["agents:write"], "GET", "/api/agents", None, "agents:read"),
+        (["threads:read"], "GET", "/api/scheduled-tasks", None, "schedules:read"),
+        (["schedules:read"], "GET", "/api/scheduled-tasks", None, "threads:read"),
+        (["threads:write", "runs:create"], "POST", "/api/scheduled-tasks/t1/trigger", None, "schedules:write"),
+        (["schedules:write", "threads:write"], "POST", "/api/scheduled-tasks/t1/trigger", None, "runs:create"),
+        (["schedules:write", "runs:create"], "POST", "/api/scheduled-tasks/t1/trigger", None, "threads:write"),
+    ],
+)
+def test_pat_configuration_requires_explicit_scopes(configuration_client, scopes, method, path, body, permission):
+    client = configuration_client
+    headers = _pat_headers(client, scopes)
+    response = client.request(method, path, json=body, headers=headers)
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == f"Permission denied: {permission}"
+
+
+def test_pat_configuration_preserves_admin_and_session_boundaries(configuration_client):
+    client = configuration_client
+    body = {"name": "denied", "description": "Denied", "system_prompt": "Denied"}
+    for user_id, scopes in [("user-1", ["subagents:write"]), ("admin-1", ["agents:write"])]:
+        headers = _pat_headers(client, scopes, user_id=user_id)
+        assert client.post("/api/subagents", json=body, headers=headers).status_code == 403
+        assert client.get("/api/subagents", headers=headers).status_code == 403
+
+    headers = _pat_headers(client, ["subagents:write", "agents:write", "schedules:write"], user_id="admin-1")
+    for method, path in [("GET", "/api/admin-check"), ("GET", "/api/v1/auth/pats"), ("DELETE", "/api/memory"), ("PUT", "/api/user-profile")]:
+        assert client.request(method, path, headers=headers).status_code == 403
+    from app.gateway.deps import get_local_provider
+
+    # An already-issued token loses managed-subagent access on owner demotion.
+    get_local_provider()._users["admin-1"].system_role = "user"
+    assert client.post("/api/subagents", json=body, headers=headers).status_code == 403
+
+
+def test_pat_configuration_respects_owner_route_policy(configuration_client, monkeypatch):
+    client = configuration_client
+    headers = _pat_headers(client, ["agents:read", "agents:write"])
+    monkeypatch.setattr(
+        "app.gateway.authz._get_route_authorization_config",
+        lambda: AuthorizationConfig(enabled=True, provider=AuthorizationProviderConfig(use="deerflow.authz.rbac:RbacAuthorizationProvider", config={"roles": {"user": {"routes": {"allow": ["agents:read"]}}}})),
+    )
+    response = client.post("/api/agents", json={"name": "denied"}, headers=headers)
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission denied: agents:write"
+
+
+def test_pat_configuration_route_policy():
+    from app.gateway.auth.pat import is_pat_allowed_route
+
+    for method, path in [
+        ("GET", "/api/agents"),
+        ("POST", "/api/agents"),
+        ("GET", "/api/agents/ci-agent"),
+        ("PUT", "/api/agents/ci-agent"),
+        ("DELETE", "/api/agents/ci-agent"),
+        ("GET", "/api/scheduled-tasks"),
+        ("POST", "/api/scheduled-tasks"),
+        ("GET", "/api/scheduled-tasks/t1"),
+        ("PATCH", "/api/scheduled-tasks/t1"),
+        ("DELETE", "/api/scheduled-tasks/t1"),
+        ("POST", "/api/scheduled-tasks/t1/pause"),
+        ("POST", "/api/scheduled-tasks/t1/resume"),
+        ("POST", "/api/scheduled-tasks/t1/trigger"),
+        ("GET", "/api/subagents"),
+        ("POST", "/api/subagents"),
+        ("PUT", "/api/subagents/ci-worker"),
+        ("DELETE", "/api/subagents/ci-worker"),
+    ]:
+        assert is_pat_allowed_route(method, path), (method, path)
+        assert is_pat_allowed_route(method, path + "/"), (method, path)
+    for method, path in [
+        ("PATCH", "/api/agents/ci-agent"),
+        ("DELETE", "/api/agents"),
+        ("POST", "/api/agents/import"),
+        ("GET", "/api/agents/ci-agent/export"),
+        ("GET", "/api/agents/check"),
+        ("PUT", "/api/scheduled-tasks/t1"),
+        ("POST", "/api/scheduled-tasks/preview-cron"),
+        ("GET", "/api/scheduled-tasks/preview-cron"),
+        ("GET", "/api/scheduled-tasks/t1/runs"),
+        ("GET", "/api/scheduled-tasks/t1/trigger"),
+        ("POST", "/api/scheduled-tasks/t1/future-action"),
+        ("GET", "/api/subagents/ci-worker"),
+        ("PATCH", "/api/subagents/ci-worker"),
+    ]:
+        assert not is_pat_allowed_route(method, path), (method, path)

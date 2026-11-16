@@ -37,6 +37,9 @@ _ALL_PERMISSIONS = [
     Permissions.PROJECTS_READ,
     Permissions.PROJECTS_WRITE,
     Permissions.PROJECTS_DELETE,
+    Permissions.SCHEDULES_READ,
+    Permissions.SCHEDULES_WRITE,
+    Permissions.SUBAGENTS_WRITE,
 ]
 
 

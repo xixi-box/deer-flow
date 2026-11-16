@@ -92,7 +92,9 @@ Content-Type: application/json
 ```
 
 - `scopes` — subset of the route permissions: `threads:read`, `threads:write`,
-  `threads:delete`, `runs:create`, `runs:read`, `runs:cancel`. A PAT can only
+  `threads:delete`, `runs:create`, `runs:read`, `runs:cancel`, `projects:read`,
+  `projects:write`, `projects:delete`, `agents:read`, `agents:write`,
+  `schedules:read`, `schedules:write`, `subagents:write`. A PAT can only
   *narrow* its owning user's permissions, never widen them.
 - `expires_in_days` — optional (`1`–`365`); omitted means the token never expires.
 
@@ -138,7 +140,7 @@ Revocation is immediate.
   creation (the default `reject` stays at `runs:create`). Joining a run's
   stream is pure observation — an observer disconnecting never cancels the run.
 - **Route-level default-deny:** PAT requests are admitted only to the
-  thread/run lifecycle routes the v1 scopes govern — `POST /api/threads`
+  explicitly enumerated routes, including the thread/run lifecycle — `POST /api/threads`
   (create), `POST /api/threads/search` (list), `GET/PATCH/DELETE
   /api/threads/{thread_id}`, the thread `goal`/`state`/`compact`/`history`/
   `branches` subroutes, and exactly the implemented `/runs` subroutes
@@ -149,14 +151,36 @@ Revocation is immediate.
   `GET|POST .../runs/{run_id}/stream`), plus `POST /api/runs/stream|wait` and
   `GET /api/runs/{run_id}/messages|feedback`. A route added under `/runs` is
   denied until explicitly added to the policy.
-  Every other authenticated route — memory, agents, models, MCP/skills
+  Configuration automation is opt-in through these additional scopes:
+
+  | Scope | Admitted configuration routes |
+  | --- | --- |
+  | `agents:read` | `GET /api/agents` and `/api/agents/{name}` |
+  | `agents:write` | `POST /api/agents`, `PUT/DELETE /api/agents/{name}` |
+  | `schedules:read` | `GET /api/scheduled-tasks` and `/api/scheduled-tasks/{task_id}` |
+  | `schedules:write` | `POST /api/scheduled-tasks`, `PATCH/DELETE /api/scheduled-tasks/{task_id}`, and `POST .../{task_id}/pause|resume|trigger` |
+  | `subagents:write` | `GET/POST /api/subagents` and `PUT/DELETE /api/subagents/{name}`, for admin owners only |
+
+  Existing tokens keep their original scopes. Deployments with explicit RBAC
+  route allowlists must grant the new permissions to the token owner's role.
+  These scopes also intersect the owner's current route permissions. Agent
+  management still requires the operator's `agents_api.enabled` flag. Schedule
+  reads retain `threads:read`; mutations retain `threads:write`, and create,
+  update, resume and trigger also retain `runs:create`. For example, provisioning
+  a schedule needs both `schedules:write` and `threads:write` plus `runs:create`.
+  Pause and delete do not start runs. Agent import/export, cron preview, schedule
+  run listings and thread schedule views remain outside the PAT allowlist.
+  Every other authenticated route — memory, user profile, models, MCP/skills
   config, integrations, channels, uploads — answers `403` to PAT callers
   regardless of scopes. Scope enforcement alone only constrains
   permission-decorated routes, so the allowlist is the outer boundary;
   session-cookie callers are unaffected.
-- PAT credentials never carry admin capability, even when the owning user is
-  an admin. This includes extension-contributed admin routes: the extension
-  principal projection suppresses every admin signal for PAT callers.
+- PAT credentials carry no general admin capability. Only the managed-subagent
+  routes explicitly accept `subagents:write` from a token whose owner is currently
+  an admin; the catalog then includes system prompts. Other admin routes remain
+  closed, including extension-contributed routes, whose principal projection
+  suppresses every admin signal for PAT callers. PAT management and password
+  changes still require an interactive session.
 - Revoking or deleting the owning user invalidates their PATs on the next
   request.
 

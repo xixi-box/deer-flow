@@ -85,6 +85,11 @@ class Permissions:
     AGENTS_READ = "agents:read"
     AGENTS_WRITE = "agents:write"
 
+    # Opt-in configuration permissions for PAT automation.
+    SCHEDULES_READ = "schedules:read"
+    SCHEDULES_WRITE = "schedules:write"
+    SUBAGENTS_WRITE = "subagents:write"
+
 
 class AuthContext:
     """Authentication context for the current request.
@@ -172,6 +177,9 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.PROJECTS_READ,
     Permissions.PROJECTS_WRITE,
     Permissions.PROJECTS_DELETE,
+    Permissions.SCHEDULES_READ,
+    Permissions.SCHEDULES_WRITE,
+    Permissions.SUBAGENTS_WRITE,
 ]
 
 
