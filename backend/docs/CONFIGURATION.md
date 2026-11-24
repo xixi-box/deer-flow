@@ -1778,7 +1778,8 @@ sandbox:
    resource_requests: {cpu: "1", memory: 2Gi}  # sandbox requests; omitted = server default
    sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
    bash_command_timeout: 600          # default remote command timeout seconds
-   replicas: 3                        # active + warm cap per gateway process
+   replicas: 3                        # per-Gateway-process capacity
+   # overflow_policy: reject         # opt in to a hard cap
    idle_timeout: 600                  # warm seconds before destroy; 0 disables
    environment:
       PYTHONUNBUFFERED: "1"
@@ -1819,8 +1820,20 @@ serialized so a shorter renewal cannot overwrite an in-flight command's
 horizon. File transfer uses OpenSandbox's native filesystem API; bounded
 `find`/`grep` commands implement the directory and content-search surface.
 Downloads are restricted to `/mnt/user-data` and all file paths reject
-traversal. Multi-process discovery and ownership coordination are not yet
-implemented, so `replicas` is a per-Gateway-process soft cap.
+traversal.
+
+Set `overflow_policy: reject` to enforce `replicas` as a hard cap for this
+Gateway process. Active sandboxes, warm sandboxes, and acquisitions or removals
+in progress count toward the cap. When a different scope needs a slot, the
+provider evicts the oldest warm sandbox if one is available. A full pool
+produces a retryable capacity error with a suggested delay. Sandbox tools tell
+the agent to wait before retrying, and eager acquisition failures show a
+busy-pool message in the run error.
+
+OpenSandbox uses a soft cap when `overflow_policy` is omitted or set to `wait`
+or `burst`. To use the hard cap to protect a Kubernetes namespace quota, run one
+Gateway process and set `replicas` at or below the number of sandbox pods the
+quota can fit. Account for other workloads sharing that quota.
 
 **boxd Machine Sandbox** (runs each sandbox as an isolated [boxd](https://boxd.sh?ref=deer-flow) machine):
 

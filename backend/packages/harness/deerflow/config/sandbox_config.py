@@ -342,7 +342,7 @@ class SandboxConfig(BaseModel):
     )
     overflow_policy: SandboxOverflowPolicy = Field(
         default="wait",
-        description="E2B capacity policy. Use wait, reject, or burst.",
+        description="Capacity policy. E2B supports wait, reject, and burst. OpenSandbox enforces a per-process hard cap only with reject.",
     )
     acquire_timeout: int = Field(
         default=30,

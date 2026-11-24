@@ -22,20 +22,38 @@ import sys
 import threading
 import time
 import types
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from langchain.agents import create_agent
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
+from deerflow.agents.thread_state import ThreadState
 from deerflow.community.opensandbox.provider import OpenSandboxProvider, _import_sdk
 from deerflow.community.opensandbox.sandbox import OpenSandboxSandbox
 from deerflow.config import ExtensionsConfig, SkillsConfig
+from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import SkillStateConfig
 from deerflow.config.paths import Paths
+from deerflow.config.tool_progress_config import ToolProgressConfig
+from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.runtime.runs.worker import RunContext, run_agent
+from deerflow.sandbox import tools as sandbox_tools
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.middleware import SandboxMiddleware
 from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
 from deerflow.skills.projection import get_thread_skill_projection_paths
@@ -508,6 +526,208 @@ def test_scope_reuse_and_user_thread_isolation(monkeypatch: pytest.MonkeyPatch) 
     assert sdk.remotes[0].renew_calls == [timedelta(hours=4)]
     assert len({id(call["connection_config"]) for call in sdk.create_calls}) == 3
     provider.shutdown()
+
+
+@pytest.mark.parametrize("policy", [None, "wait", "burst", "reject"])
+def test_capacity_policy_from_yaml(tmp_path, monkeypatch, policy):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "sandbox:\n  use: deerflow.community.opensandbox:OpenSandboxProvider\n  replicas: 1\n  idle_timeout: 0\n" + (f"  overflow_policy: {policy}\n" if policy else ""),
+        encoding="utf-8",
+    )
+    extensions = tmp_path / "extensions_config.json"
+    extensions.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions))
+    config = AppConfig.from_file(str(path))
+    sdk = _FakeSandboxClass()
+    monkeypatch.setattr("deerflow.community.opensandbox.provider.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.community.opensandbox.provider._import_sdk", lambda: (sdk, _FakeConnectionConfig, _FakeRunCommandOpts))
+    provider = OpenSandboxProvider()
+    try:
+        first = provider.acquire("first")
+        assert provider.acquire("first") == first
+        if policy == "reject":
+            with pytest.raises(SandboxCapacityExceededError) as rejected:
+                provider.acquire()
+            assert (rejected.value.active, rejected.value.warm, rejected.value.reserved, rejected.value.replicas) == (1, 0, 0, 1)
+            assert len(sdk.create_calls) == 1
+            provider.release(first)
+            assert provider.acquire("first") == first
+            assert len(sdk.create_calls) == 1
+            provider.release(first)
+            provider.acquire("second")
+            assert sdk.remotes[0].destroy_calls == 1
+        else:
+            provider.acquire("second")
+            assert sdk.remotes[0].destroy_calls == 0
+        assert len(sdk.create_calls) == 2
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("failure", ["create", "bootstrap", "projection"])
+def test_capacity_during_failed_acquire(monkeypatch, failure):
+    entered = threading.Event()
+    release = threading.Event()
+    first_remote = _FakeRemote("first", bootstrap_exit_code=17 if failure == "bootstrap" else 0)
+
+    def block():
+        entered.set()
+        assert release.wait(timeout=5)
+
+    def create_remote(index):
+        if not entered.is_set() and index == 1:
+            if failure == "create":
+                block()
+                raise RuntimeError("create failed")
+            return first_remote
+        return _FakeRemote("next")
+
+    sdk = _FakeSandboxClass(create_remote)
+    provider, _ = _install(monkeypatch, sdk=sdk, config={"replicas": 1, "overflow_policy": "reject"})
+    if failure == "bootstrap":
+        original_run = first_remote.commands.run
+
+        def run(*args, **kwargs):
+            block()
+            return original_run(*args, **kwargs)
+
+        monkeypatch.setattr(first_remote.commands, "run", run)
+    if failure == "projection":
+
+        def prepare(sandbox, *, thread_id, user_id):
+            if thread_id == "first":
+                block()
+                raise RuntimeError("projection failed")
+
+        monkeypatch.setattr(provider, "_prepare_new_skill_view", prepare)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(provider.acquire, "first")
+            try:
+                assert entered.wait(timeout=5)
+                with pytest.raises(SandboxCapacityExceededError) as rejected:
+                    asyncio.run(provider.acquire_async("second"))
+                assert (rejected.value.active, rejected.value.warm, rejected.value.reserved, rejected.value.replicas) == (0, 0, 1, 1)
+                assert len(sdk.create_calls) == 1
+            finally:
+                release.set()
+            with pytest.raises(RuntimeError, match=failure):
+                pending.result(timeout=5)
+        if failure != "create":
+            assert first_remote.destroy_calls == 1
+        assert provider.get(provider.acquire("second")) is not None
+        assert len(sdk.create_calls) == 2
+    finally:
+        provider.shutdown()
+
+
+class _ScriptedModel(GenericFakeChatModel):
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+
+class _ModelRequests(BaseCallbackHandler):
+    def __init__(self):
+        self.messages = []
+
+    def on_chat_model_start(self, serialized, messages, **kwargs):
+        self.messages.append(messages[0])
+
+
+@pytest.fixture
+def occupied_opensandbox(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "absent.yaml"))
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+
+    class SandboxTimeoutException(RuntimeError):
+        pass
+
+    def create_remote(index):
+        if index > 1:
+            raise SandboxTimeoutException("Request timed out waiting for sandbox readiness")
+        return _FakeRemote("occupied")
+
+    sdk = _FakeSandboxClass(create_remote)
+    provider, _ = _install(monkeypatch, sdk=sdk, config={"replicas": 1, "overflow_policy": "reject"})
+    monkeypatch.setattr("deerflow.sandbox.sandbox_provider._default_sandbox_provider", provider)
+    try:
+        provider.acquire("occupied")
+        yield sdk
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_capacity_during_lazy_tool_calls(occupied_opensandbox, mode):
+    tools = [sandbox_tools.bash_tool, sandbox_tools.read_file_tool]
+    calls = [
+        ("bash", {"command": "pwd"}),
+        ("read_file", {"path": "/mnt/user-data/workspace/notes.txt"}),
+        ("bash", {"command": "pwd"}),
+        ("bash", {"command": "pwd"}),
+        ("bash", {"command": "pwd"}),
+    ]
+    responses = [AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": f"call-{index}"}]) for index, (name, args) in enumerate(calls)] + [AIMessage(content="The sandbox is busy.")]
+    middleware = [
+        ToolResultSanitizationMiddleware(),
+        ToolProgressMiddleware.from_config(ToolProgressConfig(enabled=True, warn_escalation_count=1)),
+        ToolErrorHandlingMiddleware(),
+    ]
+    graph = create_agent(_ScriptedModel(messages=iter(responses)), tools=tools, middleware=middleware, state_schema=ThreadState)
+    state = {"messages": [{"role": "user", "content": "Check the working directory and its notes."}]}
+    context = {"thread_id": "waiting", "user_id": "default"}
+    requests = _ModelRequests()
+    config = {"callbacks": [requests]}
+    result = graph.invoke(state, context=context, config=config) if mode == "sync" else await graph.ainvoke(state, context=context, config=config)
+    messages = [message for message in result["messages"] if isinstance(message, ToolMessage)]
+    assert len(messages) == len(calls)
+    for index, message in enumerate(messages):
+        assert message.tool_call_id == f"call-{index}"
+        meta = message.additional_kwargs[TOOL_META_KEY]
+        assert meta["error_type"] == "capacity"
+        assert meta["recommended_next_action"] == "retry_later"
+        assert meta["recoverable_by_model"] is True
+        assert message.status == "error"
+        assert "All 1 sandboxes are in use. Retry in about 5 s." in message.content
+        assert "tell the user" in message.content
+    last_request = requests.messages[-1]
+    visible = [message for message in last_request if isinstance(message, ToolMessage)]
+    assert json.loads(visible[-1].content) == {TOOL_META_KEY: {"status": "error", "source": "tool_return"}, "content": messages[-1].content}
+    assert any("Wait for the suggested interval before retrying." in message.text for message in last_request)
+    assert len(occupied_opensandbox.create_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_capacity_during_eager_run(occupied_opensandbox):
+    manager = RunManager()
+    record = await manager.create("waiting")
+    bridge = types.SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    graph = create_agent(
+        _ScriptedModel(messages=iter([AIMessage(content="sandbox acquired")])),
+        tools=[sandbox_tools.bash_tool],
+        middleware=[SandboxMiddleware(lazy_init=False, owns_agent_skill_projection=False)],
+        state_schema=ThreadState,
+    )
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_: graph,
+        graph_input={"messages": [{"role": "user", "content": "Check the sandbox."}]},
+        config={},
+    )
+    assert record.status == RunStatus.error
+    errors = [event.args[2] for event in bridge.publish.await_args_list if event.args[1] == "error"]
+    assert len(errors) == 1
+    assert errors[0]["name"] == "SandboxCapacityExceededError"
+    assert errors[0]["details"]["code"] == SandboxCapacityExceededError.CODE
+    assert errors[0]["details"]["retry_after_seconds"] == 5
+    assert errors[0]["message"] == record.error == "The sandbox pool is busy. Try again in about 5 seconds."
+    assert len(occupied_opensandbox.create_calls) == 1
 
 
 def test_active_scope_terminal_renewal_failure_rebuilds_in_same_acquire(monkeypatch: pytest.MonkeyPatch) -> None:

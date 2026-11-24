@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 from deerflow.config import get_app_config
 from deerflow.sandbox.acquire_serialization import AcquireSerializer, AcquireSerializerClosed
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.sandbox_provider import SandboxProvider
@@ -145,6 +146,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         self._sandboxes: dict[str, OpenSandboxSandbox] = {}
         self._thread_sandboxes: dict[tuple[str, str], str] = {}
         self._warm_pool: dict[str, tuple[OpenSandboxSandbox, float]] = {}
+        self._reserved = 0
+        self._retiring = 0
         self._acquire_serializer: AcquireSerializer[str] = AcquireSerializer(thread_name_prefix="opensandbox-acquire-wait")
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
@@ -235,6 +238,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             "command_timeout": self._positive_float("bash_command_timeout", option("bash_command_timeout"), DEFAULT_COMMAND_TIMEOUT),
             "environment": environment,
             "replicas": replicas if replicas is not None else self.DEFAULT_REPLICAS,
+            "reject_overflow": option("overflow_policy") == "reject",
             "idle_timeout": idle_timeout if idle_timeout is not None else self.DEFAULT_IDLE_TIMEOUT,
             "resource": resource_option("resource"),
             "resource_requests": resource_option("resource_requests"),
@@ -281,8 +285,21 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
     def _active_count_locked(self) -> int:
         return len(self._sandboxes)
 
+    def _remove_warm_for_destroy_locked(self, sandbox_id: str) -> tuple[OpenSandboxSandbox, float] | None:
+        removed = super()._remove_warm_for_destroy_locked(sandbox_id)
+        if removed is not None:
+            self._retiring += 1
+        return removed
+
     def _destroy_warm_entry(self, sandbox_id: str, entry: OpenSandboxSandbox, *, reason: str) -> None:
-        self._destroy_quietly(entry, context=f"warm pool, reason={reason}")
+        self._destroy_retiring(entry, context=f"warm pool, reason={reason}")
+
+    def _destroy_retiring(self, sandbox: OpenSandboxSandbox, *, context: str) -> None:
+        try:
+            self._destroy_quietly(sandbox, context=context)
+        finally:
+            with self._lock:
+                self._retiring -= 1
 
     @staticmethod
     def _destroy_quietly(sandbox: OpenSandboxSandbox, *, context: str) -> None:
@@ -298,14 +315,15 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             warm_entry = self._warm_pool.get(sandbox_id)
             if active is sandbox:
                 self._sandboxes.pop(sandbox_id)
+                self._retiring += 1
             elif warm_entry is not None and warm_entry[0] is sandbox:
-                self._warm_pool.pop(sandbox_id)
+                self._remove_warm_for_destroy_locked(sandbox_id)
             else:
                 return
             for key in [key for key, value in self._thread_sandboxes.items() if value == sandbox_id]:
                 self._thread_sandboxes.pop(key, None)
         logger.warning("Invalidating OpenSandbox %s after terminal failure: %s", sandbox_id, reason)
-        self._destroy_quietly(sandbox, context="terminal failure")
+        self._destroy_retiring(sandbox, context="terminal failure")
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         with self._lock:
@@ -313,22 +331,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 raise RuntimeError("OpenSandboxProvider has been shut down")
         if thread_id is None:
             sandbox_id = str(uuid.uuid4())[:8]
-            sandbox = self._create_sandbox(sandbox_id, thread_id=None, user_id=user_id)
-            try:
-                self._prepare_new_skill_view(sandbox, thread_id=None, user_id=user_id)
-            except BaseException:
-                self._destroy_quietly(sandbox, context="skill projection setup failed")
-                raise
-            with self._lock:
-                if self._shutdown_called:
-                    destroy_after_unlock = True
-                else:
-                    self._sandboxes[sandbox_id] = sandbox
-                    destroy_after_unlock = False
-            if destroy_after_unlock:
-                self._destroy_quietly(sandbox, context="created during shutdown")
-                raise RuntimeError("OpenSandboxProvider shut down during acquire")
-            return sandbox_id
+            return self._acquire_new(sandbox_id, key=None, thread_id=None, user_id=user_id)
 
         key = self._thread_key(thread_id, user_id)
         sandbox_id = self._sandbox_id(thread_id, user_id or "")
@@ -366,36 +369,66 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 if not invalidated or not active.is_closed or shutting_down:
                     raise
                 logger.info("Rebuilding terminal OpenSandbox %s during acquire", existing)
-        sandbox = self._reclaim_warm_pool(sandbox_id)
+        return self._acquire_new(sandbox_id, key=key, thread_id=thread_id, user_id=user_id)
+
+    def _acquire_new(self, sandbox_id: str, *, key: tuple[str, str] | None, thread_id: str | None, user_id: str | None) -> str:
+        sandbox = self._reclaim_warm_pool(sandbox_id) if key is not None else None
         reclaimed = sandbox is not None
-        if sandbox is None:
-            sandbox = self._create_sandbox(sandbox_id, thread_id=thread_id, user_id=user_id)
+        evicted = None if reclaimed else self._reserve_create_slot(sandbox_id)
         try:
+            if evicted is not None:
+                # Replace the evicted remote only after its deletion succeeds.
+                evicted.destroy()
+            if sandbox is None:
+                sandbox = self._create_sandbox(sandbox_id, thread_id=thread_id, user_id=user_id)
             self._prepare_new_skill_view(sandbox, thread_id=thread_id, user_id=user_id)
+            with self._lock:
+                if not self._shutdown_called:
+                    self._sandboxes[sandbox_id] = sandbox
+                    if key is not None:
+                        self._thread_sandboxes[key] = sandbox_id
+                    self._reserved -= 1
+                    return sandbox_id
+            raise RuntimeError("OpenSandboxProvider shut down during acquire")
         except BaseException as exc:
             if reclaimed and isinstance(exc, _SkillUploadError):
+                assert sandbox is not None
                 self._park_failed_skill_upload(sandbox, was_active=False)
             else:
-                self._destroy_quietly(sandbox, context="skill projection setup failed")
+                try:
+                    if sandbox is not None:
+                        self._destroy_quietly(sandbox, context="acquire failed")
+                finally:
+                    with self._lock:
+                        self._reserved -= 1
             raise
+
+    def _reserve_create_slot(self, sandbox_id: str) -> OpenSandboxSandbox | None:
+        if not self._config["reject_overflow"]:
+            replicas, total = self._replica_count()
+            if total >= replicas:
+                evicted = self._evict_oldest_warm()
+                self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
+            with self._lock:
+                self._reserved += 1
+            return None
+
+        replicas = int(self._config["replicas"])
         with self._lock:
-            if self._shutdown_called:
-                destroy_after_unlock = True
-            else:
-                self._sandboxes[sandbox_id] = sandbox
-                self._thread_sandboxes[key] = sandbox_id
-                destroy_after_unlock = False
-        if destroy_after_unlock:
-            self._destroy_quietly(sandbox, context="created during shutdown")
-            raise RuntimeError("OpenSandboxProvider shut down during acquire")
-        return sandbox_id
+            active = self._active_count_locked()
+            warm = len(self._warm_pool)
+            total = active + warm + self._reserved + self._retiring
+            evicted = None
+            if total >= replicas:
+                if not warm:
+                    raise SandboxCapacityExceededError(active=active, warm=warm, reserved=self._reserved, transitioning=self._retiring, replicas=replicas)
+                oldest = min(self._warm_pool, key=lambda entry: self._warm_pool[entry][1])
+                evicted, _ = self._warm_pool.pop(oldest)
+            # A warm eviction hands its slot to this acquisition under the same lock.
+            self._reserved += 1
+            return evicted
 
     def _create_sandbox(self, sandbox_id: str, *, thread_id: str | None, user_id: str | None) -> OpenSandboxSandbox:
-        replicas, total = self._replica_count()
-        if total >= replicas:
-            evicted = self._evict_oldest_warm()
-            self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
-
         sandbox_cls, connection_config_cls, run_command_opts_cls = self._get_sdk()
         connection_config = self._new_connection_config(connection_config_cls)
         metadata = {"deer_flow_provider": "opensandbox"}
@@ -426,7 +459,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             if exit_code != 0:
                 detail = format_execution(bootstrap).strip() or ("no exit code" if exit_code is None else f"exit code {exit_code}")
                 raise RuntimeError(f"OpenSandbox bootstrap failed: {detail}")
-        except Exception:
+        except BaseException:
             try:
                 remote.destroy()
             except Exception:
@@ -452,16 +485,17 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         sandbox = warm_entry[0]
         if not sandbox.ping():
             with self._lock:
-                removed = self._warm_pool.pop(sandbox_id, None)
+                removed = self._remove_warm_for_destroy_locked(sandbox_id)
             if removed is not None:
                 self._destroy_warm_entry(sandbox_id, removed[0], reason="health_check_failed")
             return None
         with self._lock:
-            removed = self._warm_pool.pop(sandbox_id, None)
-            if removed is None:
+            if self._warm_pool.get(sandbox_id) is not warm_entry:
                 return None
+            self._warm_pool.pop(sandbox_id)
+            self._reserved += 1
         logger.info("Reclaimed warm OpenSandbox %s (remote=%s)", sandbox_id, sandbox.remote_id)
-        return removed[0]
+        return sandbox
 
     def get(self, sandbox_id: str) -> Sandbox | None:
         with self._lock:
@@ -490,8 +524,15 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                     self._thread_sandboxes.pop(key)
             if not self._shutdown_called:
                 self._warm_pool[sandbox_id] = (sandbox, time.monotonic())
+                if not was_active:
+                    self._reserved -= 1
                 return
-        self._destroy_quietly(sandbox, context="skill upload failed during shutdown")
+        try:
+            self._destroy_quietly(sandbox, context="skill upload failed during shutdown")
+        finally:
+            if not was_active:
+                with self._lock:
+                    self._reserved -= 1
 
     def sync_agent_skills(self, sandbox_id: str, *, thread_id: str, user_id: str, projection: SkillProjectionPaths) -> None:
         from deerflow.skills.projection import get_thread_skill_projection_paths

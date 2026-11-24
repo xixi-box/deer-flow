@@ -36,6 +36,10 @@ class WarmPoolLifecycleMixin[WarmEntryT]:
         """Destroy a warm-pool entry after it has been removed from the pool."""
         raise NotImplementedError
 
+    def _remove_warm_for_destroy_locked(self, sandbox_id: str) -> tuple[WarmEntryT, float] | None:
+        """Remove a warm entry for destruction while holding ``_lock``."""
+        return self._warm_pool.pop(sandbox_id, None)
+
     def _replica_count(self) -> tuple[int, int]:
         """Return configured replicas and current active + warm entry count."""
         replicas = int(self._config.get("replicas", DEFAULT_REPLICAS))
@@ -61,7 +65,7 @@ class WarmPoolLifecycleMixin[WarmEntryT]:
             if not self._warm_pool:
                 return None
             sandbox_id, (entry, _) = min(self._warm_pool.items(), key=lambda item: item[1][1])
-            self._warm_pool.pop(sandbox_id)
+            self._remove_warm_for_destroy_locked(sandbox_id)
 
         self._destroy_warm_entry(sandbox_id, entry, reason="replica_enforcement")
         return sandbox_id
@@ -81,7 +85,7 @@ class WarmPoolLifecycleMixin[WarmEntryT]:
                 if now - timestamp > timeout:
                     expired.append((sandbox_id, entry))
             for sandbox_id, _ in expired:
-                self._warm_pool.pop(sandbox_id, None)
+                self._remove_warm_for_destroy_locked(sandbox_id)
 
         for sandbox_id, entry in expired:
             self._destroy_warm_entry(sandbox_id, entry, reason="idle_timeout")

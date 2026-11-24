@@ -21,7 +21,7 @@ TOOL_META_KEY = "deerflow_tool_meta"
 PROGRESS_GUARD_ERROR_TYPE = "blocked_by_progress_guard"
 
 ToolResultStatus = Literal["success", "error", "partial_success"]
-RecommendedNextAction = Literal["continue", "rewrite_query", "try_alternative", "summarize", "stop"]
+RecommendedNextAction = Literal["continue", "rewrite_query", "try_alternative", "retry_later", "summarize", "stop"]
 TOOL_RESULT_STATUSES = frozenset(get_args(ToolResultStatus)) | {"unknown"}
 TOOL_RESULT_NEXT_ACTIONS = frozenset(get_args(RecommendedNextAction)) | {"unknown"}
 
@@ -43,7 +43,7 @@ _UNKNOWN_ERROR: dict[str, object] = {
     "recoverable_by_model": True,
     "recommended_next_action": "try_alternative",
 }
-TOOL_RESULT_ERROR_TYPES = frozenset({"auth", "rate_limited", "transient", "config", "permission", "no_results", "not_found", "internal", "unknown", PROGRESS_GUARD_ERROR_TYPE})
+TOOL_RESULT_ERROR_TYPES = frozenset({"auth", "rate_limited", "capacity", "transient", "config", "permission", "no_results", "not_found", "internal", "unknown", PROGRESS_GUARD_ERROR_TYPE})
 
 
 class _ModelToolResultText(str):

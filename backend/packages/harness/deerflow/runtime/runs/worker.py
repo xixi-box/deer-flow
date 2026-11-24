@@ -105,6 +105,7 @@ from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
 from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS, register_sandbox_prewarm_cleanup
 from deerflow.scheduler.runtime import SCHEDULER_CAPABILITY_CONTEXT_KEY, SchedulerRunCapability
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
@@ -1138,7 +1139,7 @@ async def run_agent(
     # the verdict alone.
     goal_participated = False
     produced_output_paths: list[str] | None = None
-    terminal_error_frame: dict[str, str] | None = None
+    terminal_error_frame: dict[str, Any] | None = None
     # Journal construction moved ahead of preflight so every terminal run can
     # emit a receipt. Completion persistence keeps its prior boundary: before
     # #4272 the journal did not exist until preflight had succeeded, so early
@@ -2069,7 +2070,8 @@ async def run_agent(
         except Exception:
             logger.warning("Failed to stop commands after run failure", exc_info=True)
         checkpoint_resume_rejected = isinstance(exc, CheckpointResumeRejected)
-        error_msg = f"{exc}"
+        capacity_error = exc if isinstance(exc, SandboxCapacityExceededError) else None
+        error_msg = f"{exc}" if capacity_error is None else f"The sandbox pool is busy. Try again in about {capacity_error.retry_after_seconds:g} seconds."
         stop_status_kwargs: dict[str, Any] = {}
         if isinstance(exc, GraphRecursionError) and evidence_execution_started:
             # The run used up its step budget: an expected stop, not a crash.
@@ -2129,10 +2131,12 @@ async def run_agent(
         if cancel_action is not None:
             await _finish_cancellation(cancel_action, restore_checkpoint=not checkpoint_resume_rejected)
         elif not record.ownership_lost:
-            error_frame = {
+            error_frame: dict[str, Any] = {
                 "message": error_msg,
                 "name": type(exc).__name__,
             }
+            if capacity_error is not None:
+                error_frame["details"] = capacity_error.details
             if record.status not in (RunStatus.pending, RunStatus.running) and getattr(record, "terminal_status_persisted", True):
                 await bridge.publish(
                     run_id,
