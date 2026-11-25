@@ -685,7 +685,8 @@ class SlackChannel(Channel):
         """
         chunks: list[bytes] = []
         total = 0
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+        client = await asyncio.to_thread(httpx.AsyncClient, timeout=httpx.Timeout(20.0))
+        async with client:
             async with client.stream(
                 "GET",
                 url,

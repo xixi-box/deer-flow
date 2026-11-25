@@ -16,12 +16,19 @@ the gate); the surface under test runs on the event loop inside the gated test.
 from __future__ import annotations
 
 import asyncio
+import ssl
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
+import httpx
 import pytest
+from slack_sdk import WebClient
 
 from app.channels import manager as mgr
-from app.channels.message_bus import InboundMessage
+from app.channels.discord import DiscordChannel
+from app.channels.message_bus import INBOUND_FILE_CONTENT_KEY, InboundMessage, MessageBus
+from app.channels.slack import SlackChannel
 from deerflow.uploads.manager import get_uploads_dir
 
 pytestmark = pytest.mark.asyncio
@@ -55,3 +62,55 @@ async def test_ingest_inbound_files_does_not_block_event_loop(tmp_path: Path, mo
     assert created[0]["filename"] == "report.txt"
     written = await asyncio.to_thread(lambda: (get_uploads_dir("t1") / "report.txt").exists())
     assert written, "inbound file should be written under the tmp uploads dir"
+
+
+@pytest.mark.parametrize("provider", ["slack", "discord"])
+async def test_attachment_tls_loads_off_event_loop(provider: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bus = MessageBus()
+    if provider == "slack":
+        url = "https://files.slack.com/files-pri/T-F/download/report.txt"
+        channel = SlackChannel(bus, {"bot_token": "test-token"})
+        channel._web_client = WebClient(token="test-token")
+        files = channel._extract_inbound_files({"files": [{"name": "report.txt", "size": 4, "url_private_download": url}]})
+        authorization = "Bearer test-token"
+    else:
+        url = "https://cdn.discordapp.com/attachments/1/2/report.txt"
+        channel = DiscordChannel(bus, {"bot_token": "test-token", "channel_store": SimpleNamespace(channels_dir=tmp_path)})
+        files = channel._extract_inbound_files(SimpleNamespace(attachments=[SimpleNamespace(filename="report.txt", size=4, url=url)]))
+        authorization = "Bot test-token"
+    msg = channel._make_inbound("chat", "sender", "caption", files=files)
+
+    monkeypatch.setenv("no_proxy", "*")
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    loop_thread = threading.get_ident()
+    certificate_threads: list[int] = []
+    requests: list[httpx.Request] = []
+    load_verify_locations = ssl.SSLContext.load_verify_locations
+
+    def record_load(context, *args, **kwargs):
+        certificate_threads.append(threading.get_ident())
+        return load_verify_locations(context, *args, **kwargs)
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"da"
+            yield b"ta"
+
+    async def respond(transport, request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, stream=Body())
+
+    monkeypatch.setattr(ssl.SSLContext, "load_verify_locations", record_load)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
+
+    result = await channel.receive_file(msg, "thread")
+
+    assert result.text == "caption"
+    assert result.files == [{"type": "file", "filename": "report.txt", "mime_type": "application/octet-stream", "size": 4, INBOUND_FILE_CONTENT_KEY: b"data"}]
+    (request,) = requests
+    assert (request.method, str(request.url)) == ("GET", url)
+    assert request.headers["Authorization"] == authorization
+    assert request.headers["Accept-Encoding"] == "identity"
+    assert certificate_threads, "The real HTTPX TLS initialization must run"
+    assert loop_thread not in certificate_threads, "Attachment TLS certificates loaded on the event-loop thread"
