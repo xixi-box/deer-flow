@@ -1,31 +1,34 @@
-import { cn } from "@/lib/utils";
+import { type ReactNode } from "react";
 
 export function Section({
-  className,
+  id,
   title,
   subtitle,
   children,
 }: {
-  className?: string;
-  title: React.ReactNode;
-  subtitle?: React.ReactNode;
-  children: React.ReactNode;
+  id: string;
+  title: string;
+  subtitle: string;
+  children: ReactNode;
 }) {
   return (
     <section
-      className={cn("mx-auto flex w-full min-w-0 flex-col py-16", className)}
+      id={id}
+      aria-labelledby={`${id}-title`}
+      className="border-border border-b last:border-b-0"
     >
-      <header className="flex flex-col items-center justify-between px-4">
-        <div className="mb-4 max-w-full bg-linear-to-r from-white via-gray-200 to-gray-400 bg-clip-text text-center text-3xl font-bold break-words text-transparent sm:text-4xl md:text-5xl">
+      <div className="mx-auto max-w-6xl px-4 py-14 sm:px-8 sm:py-18">
+        <h2
+          id={`${id}-title`}
+          className="font-serif text-3xl leading-tight tracking-tight sm:text-4xl"
+        >
           {title}
-        </div>
-        {subtitle && (
-          <div className="text-muted-foreground max-w-full text-center text-base break-words sm:text-lg md:text-xl">
-            {subtitle}
-          </div>
-        )}
-      </header>
-      <main className="mt-4 w-full min-w-0 px-4">{children}</main>
+        </h2>
+        <p className="text-muted-foreground mt-2 max-w-2xl text-base leading-relaxed">
+          {subtitle}
+        </p>
+        <div className="mt-7">{children}</div>
+      </div>
     </section>
   );
 }

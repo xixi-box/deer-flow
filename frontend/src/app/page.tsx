@@ -1,26 +1,15 @@
-import { Footer } from "@/components/landing/footer";
-import { Header } from "@/components/landing/header";
-import { Hero } from "@/components/landing/hero";
-import { CaseStudySection } from "@/components/landing/sections/case-study-section";
-import { CommunitySection } from "@/components/landing/sections/community-section";
-import { SandboxSection } from "@/components/landing/sections/sandbox-section";
-import { SkillsSection } from "@/components/landing/sections/skills-section";
-import { WhatsNewSection } from "@/components/landing/sections/whats-new-section";
+import { type Metadata } from "next";
+
+import { Landing } from "@/components/landing/landing-page";
 import { DEFAULT_LOCALE } from "@/core/i18n/locale";
+import { landingCopy } from "@/core/i18n/locales/landing";
+
+export const metadata: Metadata = {
+  title: landingCopy[DEFAULT_LOCALE].headline,
+  description: landingCopy[DEFAULT_LOCALE].intro,
+  alternates: { languages: { en: "/", zh: "/zh" } },
+};
 
 export default function LandingPage() {
-  return (
-    <div className="min-h-screen w-full overflow-x-clip bg-[#0a0a0a]">
-      <Header locale={DEFAULT_LOCALE} />
-      <main className="flex w-full flex-col">
-        <Hero />
-        <CaseStudySection />
-        <SkillsSection />
-        <SandboxSection />
-        <WhatsNewSection />
-        <CommunitySection />
-      </main>
-      <Footer />
-    </div>
-  );
+  return <Landing locale={DEFAULT_LOCALE} />;
 }

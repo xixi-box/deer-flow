@@ -444,10 +444,14 @@ HOSTNAME=127.0.0.1 PORT=3000 node .next/standalone/server.js
 ```
 
 The build includes public demo assets and resolves supported demo API reads
-locally. Writes are unavailable. To display the homepage GitHub star count, set
+locally. Writes are unavailable. On the homepage, use **Quick Start** for setup
+instructions and **Get Started** to open the workspace. The header offers
+English and Chinese versions of the homepage and a light/dark theme toggle.
+
+To display the homepage GitHub star and fork counts, set
 `GITHUB_OAUTH_TOKEN` in `frontend/.env` and add `--env-file=.env` before
 `.next/standalone/server.js` in the launch command. The token stays on the server.
-Missing credentials or GitHub failures hide the count. Restart Node after
+Missing credentials or GitHub failures hide the counts. Restart Node after
 changing the token to load the new value.
 
 ## LangGraph Studio (Optional)

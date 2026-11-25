@@ -2,10 +2,11 @@ import { describe, expect, it } from "@rstest/core";
 import { render, screen } from "@testing-library/react";
 
 import { CaseStudySection } from "@/components/landing/sections/case-study-section";
+import { landingCopy } from "@/core/i18n/locales/landing";
 
 describe("CaseStudySection", () => {
   it("uses semantic, lazy, intrinsically-sized images", () => {
-    render(<CaseStudySection />);
+    render(<CaseStudySection copy={landingCopy["en-US"]} />);
 
     const images = screen.getAllByRole("img");
     expect(images).toHaveLength(6);

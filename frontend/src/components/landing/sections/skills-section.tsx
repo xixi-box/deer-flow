@@ -1,39 +1,31 @@
-"use client";
-
-import dynamic from "next/dynamic";
-import { useRef } from "react";
-
-import { useRenderActivity } from "@/core/dom/render-activity";
-import { cn } from "@/lib/utils";
+import { type LandingCopy } from "@/core/i18n/locales/landing";
 
 import { Section } from "../section";
 
-const ProgressiveSkillsAnimation = dynamic(
-  () => import("../progressive-skills-animation"),
-  { ssr: false },
-);
-
-export function SkillsSection({ className }: { className?: string }) {
-  const animationRef = useRef<HTMLDivElement>(null);
-  const renderAnimation = useRenderActivity(animationRef, false);
-
+export function SkillsSection({ copy }: { copy: LandingCopy }) {
   return (
-    <Section
-      className={cn("h-[calc(100vh-64px)] w-full bg-white/2", className)}
-      title="Agent Skills"
-      subtitle={
-        <div>
-          Agent Skills are loaded progressively — only what&apos;s needed, when
-          it&apos;s needed.
-          <br />
-          Extend DeerFlow with your own skill files, or use our built-in
-          library.
-        </div>
-      }
-    >
-      <div ref={animationRef} className="relative min-h-96 overflow-hidden">
-        {renderAnimation && <ProgressiveSkillsAnimation />}
-      </div>
+    <Section id="skills" title={copy.skillsTitle} subtitle={copy.skillsIntro}>
+      <ol className="grid gap-3 md:grid-cols-3">
+        {copy.skillSteps.map(([title, description], index) => (
+          <li
+            className="bg-card border-border rounded-lg border p-5"
+            key={title}
+          >
+            <h3 className="flex items-center gap-3 text-lg font-medium">
+              <span
+                className="text-landing-accent font-mono text-sm"
+                aria-hidden="true"
+              >
+                {index + 1}.
+              </span>
+              {title}
+            </h3>
+            <p className="text-muted-foreground mt-2 text-base">
+              {description}
+            </p>
+          </li>
+        ))}
+      </ol>
     </Section>
   );
 }

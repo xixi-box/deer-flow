@@ -7,13 +7,14 @@ file and the code disagree, fix one of them in the same change.
 
 ## Surfaces
 
-The app has three surfaces that share one token set:
+The frontend surfaces share one set of base tokens:
 
 | Surface            | Routes                             | Character                                                                          |
 | ------------------ | ---------------------------------- | ---------------------------------------------------------------------------------- |
 | Workspace (app UI) | `/workspace/*`, `/login`, `/setup` | Dense, calm, task-focused. Most UI work happens here.                              |
 | Docs               | `/[lang]/docs/*` (Nextra 4)        | Reading-first. Nextra theme with the landing `Header` in place of Nextra's navbar. |
-| Landing and blog   | `/`, `/blog/*`                     | Brand-forward. The only place decorative effects are allowed.                      |
+| Landing            | `/`, `/zh`                         | Warm paper, serif display type, a static architecture diagram, and a green accent. |
+| Blog               | `/blog/*`                          | Reading-first, with the shared docs header.                                        |
 
 ## Color
 
@@ -25,8 +26,8 @@ in `globals.css` and exposed to Tailwind through `@theme inline`
   (paper, not pure white). Dark surfaces use hue 106.64 at chroma 0.0036.
 - **Primary is pure black in light mode and pure white in dark mode.** There is
   no brand hue; contrast does the work.
-- **The only chromatic UI color is the focus ring** (`--ring`, blue at hue 255)
-  plus `--destructive` (red). Charts use `--chart-1..5`.
+- **Workspace and docs UI colors** include the focus ring (`--ring`, blue at
+  hue 255) and `--destructive` (red). Charts use `--chart-1..5`.
 
 | Token                  | Light                        | Dark                                 | Use                                 |
 | ---------------------- | ---------------------------- | ------------------------------------ | ----------------------------------- |
@@ -144,12 +145,6 @@ format, so color is supplementary. These tints apply only to file identity tiles
 surrounding controls use semantic tokens. Rendered document colors belong to the
 file content and preserve the author's styling.
 
-Landing-only decoration that does not follow the rules above. Don't copy these
-into app or docs UI:
-
-- `Section` headings use a white-to-gray gradient text (`bg-clip-text`), and
-  `.golden-text` is a gold gradient.
-- `.ambilight` is a rainbow glow, and the header's Star on GitHub button has a
-  pink-to-violet blur behind it (`#ff80b5` to `#9089fc`).
-- `galaxy`, `aurora-text`, `flickering-grid`, `magic-bento`, `spotlight-card`
-  and `shine-border` in `components/ui/` are landing effects.
+The homepage uses the paired `landing-accent` and `landing-accent-foreground`
+tokens for primary actions and diagram details. The shared docs and blog header
+uses a decorative glow behind its GitHub link.

@@ -23,9 +23,11 @@ export type MobileNavLink = {
 export function MobileNav({
   links,
   search,
+  menuLabel = "Open menu",
 }: {
   links: MobileNavLink[];
   search?: ReactNode;
+  menuLabel?: string;
 }) {
   const pathname = usePathname();
   const contentRef = useRef<HTMLDivElement>(null);
@@ -50,7 +52,12 @@ export function MobileNav({
   return (
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetTrigger asChild className="sm:hidden">
-        <Button variant="ghost" size="icon" aria-label="Open menu">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-11"
+          aria-label={menuLabel}
+        >
           <MenuIcon className="size-5" />
         </Button>
       </SheetTrigger>
@@ -99,13 +106,13 @@ export function MobileNav({
             <div className="px-4 [&_input]:h-11">{search}</div>
           </Portal.Group>
         )}
-        <nav className="flex flex-col gap-1 px-4 text-base font-medium">
+        <nav className="flex min-h-0 flex-col gap-1 overflow-y-auto px-4 text-base font-medium">
           {links.map((link) => (
             <Link
               key={link.href}
               href={link.href}
               onClick={() => setOpen(false)}
-              className="text-secondary-foreground hover:text-foreground rounded-md py-2 transition-colors"
+              className="text-secondary-foreground hover:text-foreground flex min-h-11 shrink-0 items-center rounded-md py-2 transition-colors"
             >
               {link.label}
             </Link>

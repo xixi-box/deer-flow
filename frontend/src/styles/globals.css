@@ -214,6 +214,8 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-border: var(--border);
+  --color-landing-accent: var(--landing-accent);
+  --color-landing-accent-foreground: var(--landing-accent-foreground);
   --color-input: var(--input);
   --color-ring: var(--ring);
   --color-chart-1: var(--chart-1);
@@ -267,6 +269,9 @@
 }
 
 :root {
+  --landing-grid: color-mix(in oklab, var(--foreground) 7%, transparent);
+  --landing-accent: #2b604e;
+  --landing-accent-foreground: #fff;
   --radius: 0.625rem;
   --background: oklch(0.9855 0.0098 87.47);
   --foreground: oklch(0.145 0 0);
@@ -306,6 +311,8 @@ html.dark .shiki span {
 }
 
 .dark {
+  --landing-accent: #a3d9c2;
+  --landing-accent-foreground: #123326;
   --background: oklch(0.24 0.0036 106.64);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.238 0.0036 106.64);

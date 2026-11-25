@@ -4,8 +4,12 @@ import { env } from "@/env";
 // The explicit fetch revalidate below still caches GitHub data for one hour.
 export const revalidate = 0;
 
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 /**
- * Return only the public star count using the server's runtime GitHub token.
+ * Return public repository counts using the server's runtime GitHub token.
  * No input; missing credentials, upstream failures, or invalid counts yield 204
  * so the header hides the counter. Stays outside nginx's /api Gateway proxy.
  */
@@ -26,13 +30,18 @@ export async function GET() {
       },
     );
     if (response.ok) {
-      const data = (await response.json()) as { stargazers_count?: unknown };
-      if (
-        typeof data.stargazers_count === "number" &&
-        Number.isSafeInteger(data.stargazers_count) &&
-        data.stargazers_count >= 0
-      ) {
-        return Response.json({ stars: data.stargazers_count }, { headers });
+      const data = (await response.json()) as {
+        stargazers_count?: unknown;
+        forks_count?: unknown;
+      };
+      if (isCount(data.stargazers_count)) {
+        return Response.json(
+          {
+            stars: data.stargazers_count,
+            forks: isCount(data.forks_count) ? data.forks_count : undefined,
+          },
+          { headers },
+        );
       }
     }
   } catch {

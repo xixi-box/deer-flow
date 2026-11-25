@@ -1,35 +1,27 @@
-"use client";
-
 import { GitHubLogoIcon } from "@radix-ui/react-icons";
-import Link from "next/link";
 
-import { AuroraText } from "@/components/ui/aurora-text";
 import { Button } from "@/components/ui/button";
+import { type LandingCopy } from "@/core/i18n/locales/landing";
 
+import { repositoryURL } from "../hero";
 import { Section } from "../section";
 
-export function CommunitySection() {
+export function CommunitySection({ copy }: { copy: LandingCopy }) {
   return (
     <Section
-      title={
-        <AuroraText colors={["#60A5FA", "#A5FA60", "#A560FA"]}>
-          Join the Community
-        </AuroraText>
-      }
-      subtitle="Contribute brilliant ideas to shape the future of DeerFlow. Collaborate, innovate, and make impacts."
+      id="community"
+      title={copy.communityTitle}
+      subtitle={copy.communityIntro}
     >
-      <div className="flex justify-center">
-        <Button className="text-xl" size="lg" asChild>
-          <Link
-            href="https://github.com/bytedance/deer-flow"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <GitHubLogoIcon />
-            Contribute Now
-          </Link>
-        </Button>
-      </div>
+      <Button
+        className="bg-landing-accent text-landing-accent-foreground hover:bg-landing-accent/90 h-11"
+        asChild
+      >
+        <a href={repositoryURL}>
+          <GitHubLogoIcon aria-hidden="true" />
+          {copy.contribute}
+        </a>
+      </Button>
     </Section>
   );
 }
