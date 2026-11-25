@@ -1208,6 +1208,14 @@ Content-Type: application/json
 }
 ```
 
+The model security review shares a two-minute deadline across all files in the
+archive. If it expires, the Gateway cancels the review and returns `504` with
+`detail.code: "skill_review_timeout"`, the skill name, and a message confirming
+that the attempt did not install the skill. If the client or proxy disconnects
+during model review, the Gateway cancels the review before installing. Once
+review finishes and publication begins, the install and its cache updates run
+to completion.
+
 #### Upload and Install Skill
 
 Upload a local `.skill` archive and install it for the current user. Requires an
@@ -1221,7 +1229,7 @@ Content-Type: multipart/form-data
 **Request Body:**
 - `archive`: The `.skill` file to install. The filename must end with `.skill`.
 
-**Response:** the same shape as [Install Skill](#install-skill). An upload beyond
+**Response:** the same shape and model review deadline as [Install Skill](#install-skill). An upload beyond
 the archive limit returns `413`. A missing `archive` field returns `422`; a
 non-file `archive` part is rejected during multipart parsing and returns `400`.
 

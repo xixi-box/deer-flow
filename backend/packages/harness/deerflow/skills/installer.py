@@ -14,7 +14,11 @@ import shutil
 import stat
 import unicodedata
 import zipfile
+from collections.abc import Callable, Coroutine, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any
 
 from deerflow.skills.package_files import MAX_MODEL_BYTES, MAX_MODEL_FILE_BYTES, MAX_MODEL_FILES, is_code_path, is_executable_binary_prefix
 from deerflow.skills.permissions import make_skill_tree_sandbox_readable
@@ -28,6 +32,7 @@ from deerflow.skills.security_static_scanner import (
     skill_scan_enabled,
 )
 from deerflow.skills.skillscan.orchestrator import contains_sensitive_package_content
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
@@ -39,6 +44,9 @@ logger = logging.getLogger(__name__)
 _MAX_MEMBER_PATH_BYTES = 1024
 _MAX_MEMBER_DEPTH = 33
 _MAX_MEMBER_SEGMENT_BYTES = 255
+
+_ARCHIVE_MODEL_REVIEW_TIMEOUT_SECONDS = 120
+_review_disconnect_waiter: ContextVar[Callable[[], Coroutine[Any, Any, None]] | None] = ContextVar("skill_archive_review_disconnect", default=None)
 
 
 def _host_path_length(path: Path, *, windows: bool | None = None) -> int:
@@ -94,6 +102,28 @@ class SkillSecurityScanError(ValueError):
         super().__init__(message)
         self.findings = [dict(finding) for finding in (findings or [])]
         self.skill_name = skill_name
+
+
+class SkillArchiveReviewTimeout(TimeoutError):
+    """The package exhausted its shared model review deadline before install."""
+
+    def __init__(self, skill_name: str) -> None:
+        super().__init__("Skill security review timed out. This install attempt did not install the skill.")
+        self.skill_name = skill_name
+
+
+class SkillArchiveReviewDisconnected(Exception):
+    """The requesting client disconnected before model review completed."""
+
+
+@contextmanager
+def cancel_archive_review_on_disconnect(wait_for_disconnect: Callable[[], Coroutine[Any, Any, None]]) -> Iterator[None]:
+    """Bind the request's disconnect waiter without changing the storage API."""
+    token = _review_disconnect_waiter.set(wait_for_disconnect)
+    try:
+        yield
+    finally:
+        _review_disconnect_waiter.reset(token)
 
 
 def is_unsafe_zip_member(info: zipfile.ZipInfo) -> bool:
@@ -432,13 +462,42 @@ async def _prepare_model_review(skill_dir: Path, skill_name: str) -> list[tuple[
     return review_files
 
 
+async def _review_archive_files(skill_dir: Path, skill_name: str, review_files: list[tuple[str, bool, str | None]], static_findings: list[StaticFinding], *, app_config=None) -> None:
+    deadline = asyncio.timeout(_ARCHIVE_MODEL_REVIEW_TIMEOUT_SECONDS)
+    try:
+        async with deadline:
+            for rel_path, executable, content in review_files:
+                if content is None:
+                    # The extraction tree must outlive any worker still reading it.
+                    content = await await_drained(asyncio.to_thread(_read_required_text, skill_dir / rel_path, f"{skill_name}/{rel_path}"))
+                await _scan_skill_file_or_raise(content, rel_path, skill_name, executable=executable, static_findings=_findings_for_file(static_findings, rel_path), app_config=app_config)
+    except TimeoutError as exc:
+        if not deadline.expired():
+            raise
+        raise SkillArchiveReviewTimeout(skill_name) from exc
+
+
 async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str, *, app_config=None) -> list[StaticFinding]:
     """Run the skill security scanner against all installable text and script files."""
     static_findings = await _scan_static_skill_archive_or_raise(skill_dir, skill_name, app_config=app_config)
-    for rel_path, executable, content in await _prepare_model_review(skill_dir, skill_name):
-        if content is None:
-            content = await asyncio.to_thread(_read_required_text, skill_dir / rel_path, f"{skill_name}/{rel_path}")
-        await _scan_skill_file_or_raise(content, rel_path, skill_name, executable=executable, static_findings=_findings_for_file(static_findings, rel_path), app_config=app_config)
+    review_files = await _prepare_model_review(skill_dir, skill_name)
+    wait_for_disconnect = _review_disconnect_waiter.get()
+    review = _review_archive_files(skill_dir, skill_name, review_files, static_findings, app_config=app_config)
+    if wait_for_disconnect is None:
+        await review
+    else:
+        reviewer = asyncio.create_task(review)
+        disconnect = asyncio.create_task(wait_for_disconnect())
+        try:
+            done, _ = await asyncio.wait((reviewer, disconnect), return_when=asyncio.FIRST_COMPLETED)
+            if disconnect in done:
+                disconnect.result()
+                raise SkillArchiveReviewDisconnected
+            await reviewer
+        finally:
+            disconnect.cancel()
+            reviewer.cancel()
+            await asyncio.gather(reviewer, disconnect, return_exceptions=True)
     return static_findings
 
 

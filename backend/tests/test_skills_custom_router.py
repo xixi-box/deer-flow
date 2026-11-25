@@ -1,3 +1,4 @@
+import asyncio
 import errno
 import json
 import stat
@@ -199,6 +200,103 @@ def test_upload_skill_archive_installs_without_thread_workspace(monkeypatch, tmp
     assert refresh_calls == ["default"]
     assert len(installed_paths) == 1
     assert not installed_paths[0].exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", ["disconnect", "deadline"])
+async def test_upload_skill_archive_cancels_stalled_review(monkeypatch, tmp_path, stop):
+    from langchain_openai import ChatOpenAI
+
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.paths import Paths
+    from deerflow.skills import installer, security_scanner
+
+    config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    storage = UserScopedSkillStorage("default", host_path=str(tmp_path / "skills"), app_config=config)
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: storage)
+    monkeypatch.setattr(installer, "_ARCHIVE_MODEL_REVIEW_TIMEOUT_SECONDS", 2 if stop == "deadline" else 60, raising=False)
+
+    second_review_started = asyncio.Event()
+    release_review = asyncio.Event()
+    review_cancelled = asyncio.Event()
+    disconnected = asyncio.Event()
+    provider_slot = asyncio.Lock()
+    reviewed = []
+
+    async def respond(request):
+        async with provider_slot:
+            prompt = json.loads(request.content)["messages"][-1]["content"]
+            if prompt.startswith("Location:"):
+                location = prompt.splitlines()[0]
+                reviewed.append(location)
+                if location.endswith("/references/guide.md"):
+                    second_review_started.set()
+                    try:
+                        await release_review.wait()
+                    except asyncio.CancelledError:
+                        review_cancelled.set()
+                        raise
+                content = '{"decision":"allow","reason":"ok"}'
+            else:
+                content = "chat completed"
+            return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}]})
+
+    app = _make_test_app(config)
+    path = "/api/skills/install/upload"
+    request = httpx.Request("POST", "http://test" + path, files={"archive": ("demo.skill", _make_skill_archive_bytes("demo"), "application/zip")})
+    body = request.read()
+    messages = []
+
+    async def receive():
+        nonlocal body
+        if body is not None:
+            chunk, body = body, None
+            return {"type": "http.request", "body": chunk, "more_body": False}
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        messages.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "query_string": b"",
+        "headers": [(key.lower(), value) for key, value in request.headers.raw],
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as transport:
+        model = ChatOpenAI(model="offline", api_key="offline", http_async_client=transport, max_retries=0)
+        monkeypatch.setattr(security_scanner, "create_chat_model", lambda **kwargs: model)
+        upload = asyncio.create_task(app(scope, receive, send))
+        started = asyncio.create_task(second_review_started.wait())
+        try:
+            await asyncio.wait({upload, started}, timeout=5, return_when=asyncio.FIRST_COMPLETED)
+            assert second_review_started.is_set(), (reviewed, messages)
+            if stop == "disconnect":
+                disconnected.set()
+            finished, _ = await asyncio.wait({upload}, timeout=4)
+            assert upload in finished, f"Upload still holds the model slot after {stop}"
+            await upload
+            assert review_cancelled.is_set()
+            expected_status = 204 if stop == "disconnect" else 504
+            assert messages[0]["status"] == expected_status
+            if stop == "deadline":
+                detail = json.loads(messages[1]["body"])["detail"]
+                assert detail["code"] == "skill_review_timeout"
+                assert detail["skill_name"] == "demo"
+            assert not (storage.get_user_custom_root() / "demo").exists()
+            assert reviewed == ["Location: demo/SKILL.md", "Location: demo/references/guide.md"]
+            assert (await asyncio.wait_for(model.ainvoke("chat"), timeout=2)).content == "chat completed"
+        finally:
+            started.cancel()
+            await asyncio.gather(started, return_exceptions=True)
+            release_review.set()
+            await asyncio.wait_for(upload, timeout=5)
 
 
 def test_upload_skill_archive_rejects_non_skill_extension(monkeypatch):

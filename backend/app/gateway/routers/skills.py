@@ -44,7 +44,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills import Skill
 from deerflow.skills.diagnostics import SkillLoadDiagnostic
 from deerflow.skills.export import SkillExportError, build_skill_export, export_manifest
-from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
+from deerflow.skills.installer import SkillAlreadyExistsError, SkillArchiveReviewDisconnected, SkillArchiveReviewTimeout, SkillSecurityScanError, cancel_archive_review_on_disconnect
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
     StaticFinding,
@@ -433,12 +433,21 @@ async def _parse_skill_archive_form(request: Request) -> FormData:
     return await parser.parse()
 
 
-async def _install_skill_archive(archive_path: Path, config: AppConfig) -> SkillInstallResponse:
-    async def _persist_install() -> SkillInstallResponse:
+async def _wait_for_install_disconnect(request: Request) -> None:
+    # Both install routes consume the request body before starting review.
+    while (await request.receive())["type"] != "http.disconnect":
+        pass
+
+
+async def _install_skill_archive(archive_path: Path, config: AppConfig) -> SkillInstallResponse | Response:
+    async def _persist_install() -> SkillInstallResponse | Response:
         # A cold user-scoped storage resolves the project root and builds
         # absolute paths on construction: blocking filesystem IO.
         storage = await asyncio.to_thread(_get_user_skill_storage, config)
-        result = await storage.ainstall_skill_from_archive(archive_path)
+        try:
+            result = await storage.ainstall_skill_from_archive(archive_path)
+        except SkillArchiveReviewDisconnected:
+            return Response(status_code=204)
         # The install, its prompt-cache refresh and the shared reset marker
         # settle as one drained unit: a cancelled caller must not leave the
         # freshly installed skill absent from (or a stale one still present in)
@@ -450,6 +459,8 @@ async def _install_skill_archive(archive_path: Path, config: AppConfig) -> Skill
 
     try:
         return await await_drained(_drain_skill_mutation("install", _persist_install))
+    except SkillArchiveReviewTimeout as e:
+        raise HTTPException(status_code=504, detail={"code": "skill_review_timeout", "message": str(e), "skill_name": e.skill_name}) from e
     except SkillCacheResetPublishError as e:
         # The skill is installed; only the cross-replica publication failed.
         # Not an OSError, so it would reach the generic 500 below anyway; the
@@ -551,7 +562,7 @@ async def list_skills(request: Request, config: AppConfig = Depends(get_config))
     summary="Install Skill",
     description="Install a skill from a .skill file (ZIP archive) located in the thread's user-data directory.",
 )
-async def install_skill(request: Request, body: SkillInstallRequest, config: AppConfig = Depends(get_config)) -> SkillInstallResponse:
+async def install_skill(request: Request, body: SkillInstallRequest, config: AppConfig = Depends(get_config)) -> SkillInstallResponse | Response:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_file_path = resolve_thread_virtual_path(body.thread_id, body.path)
@@ -559,7 +570,8 @@ async def install_skill(request: Request, body: SkillInstallRequest, config: App
         raise HTTPException(status_code=404, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    return await _install_skill_archive(skill_file_path, config)
+    with cancel_archive_review_on_disconnect(lambda: _wait_for_install_disconnect(request)):
+        return await _install_skill_archive(skill_file_path, config)
 
 
 @router.post(
@@ -585,7 +597,7 @@ async def install_skill(request: Request, body: SkillInstallRequest, config: App
 async def upload_and_install_skill(
     request: Request,
     config: AppConfig = Depends(get_config),
-) -> SkillInstallResponse:
+) -> SkillInstallResponse | Response:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
 
     form: FormData | None = None
@@ -602,7 +614,8 @@ async def upload_and_install_skill(
 
         await archive.seek(0)
         temporary_path = await asyncio.to_thread(_copy_uploaded_skill_archive, archive.file)
-        return await _install_skill_archive(temporary_path, config)
+        with cancel_archive_review_on_disconnect(lambda: _wait_for_install_disconnect(request)):
+            return await _install_skill_archive(temporary_path, config)
     except _SkillArchiveUploadTooLargeError as e:
         raise HTTPException(status_code=413, detail=e.message) from e
     except MultiPartException as e:
