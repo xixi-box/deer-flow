@@ -520,6 +520,22 @@ LLM_PROVIDERS: list[LLMProvider] = [
         },
     ),
     LLMProvider(
+        name="nvidia",
+        display_name="NVIDIA NIM",
+        description="Hosted and self-hosted OpenAI-compatible NVIDIA models",
+        use="langchain_openai:ChatOpenAI",
+        models=["nvidia/nemotron-3.5-super-vl-120b-a12b", "nvidia/nemotron-3-super-120b-a12b"],
+        default_model="nvidia/nemotron-3.5-super-vl-120b-a12b",
+        env_var="NVIDIA_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "base_url": "https://integrate.api.nvidia.com/v1",
+            "supports_vision": True,
+        },
+        model_vision_overrides={"nvidia/nemotron-3-super-120b-a12b": False},
+        base_url_prompt="NVIDIA NIM base URL",
+    ),
+    LLMProvider(
         name="api_route",
         display_name="API Route",
         description="OpenAI-compatible gateway (models depend on your API key)",

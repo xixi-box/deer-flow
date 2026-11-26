@@ -117,6 +117,8 @@ fences, including unclosed fences, in complete and streamed replies.
 
    This launches an interactive wizard that guides you through choosing an LLM provider, optional web search, and execution/safety preferences such as sandbox mode, bash access, and file-write tools. It generates a minimal `config.yaml` and writes your keys to `.env`. Takes about 2 minutes.
 
+   Select **NVIDIA NIM** to choose a Nemotron model and save your `NVIDIA_API_KEY`. Press Enter at the base URL prompt to use NVIDIA's hosted service, or enter the OpenAI-compatible base URL of your self-hosted NIM.
+
    The wizard also lets you configure an optional web search provider, or skip it for now.
 
    [DeepSeek web search](../../backend/docs/CONFIGURATION.md#deepseek-web-search) uses `deerflow.community.deepseek.tools:web_search_tool`. Configure `DEEPSEEK_API_KEY` in the Gateway environment and replace the active `web_search` entry with the example in `config.example.yaml`. Set `thinking: true` for multi-step thinking search, independently of the main DeerFlow model. The default is `false`. Results include a generated answer and screened, deduplicated source links.
@@ -313,6 +315,14 @@ fences, including unclosed fences, in complete and streamed replies.
        model: claude-sonnet-4-6
        api_key: $OPPER_API_KEY
        base_url: https://api.opper.ai/v3/compat
+
+     - name: nemotron-3-5-super-vl-120b-a12b
+       display_name: Nemotron 3.5 Super VL (NVIDIA NIM)
+       use: langchain_openai:ChatOpenAI
+       model: nvidia/nemotron-3.5-super-vl-120b-a12b
+       api_key: $NVIDIA_API_KEY
+       base_url: https://integrate.api.nvidia.com/v1
+       supports_vision: true
 
      - name: api-route-gpt-6.1-sol
        display_name: GPT 6.1 Sol (API Route)

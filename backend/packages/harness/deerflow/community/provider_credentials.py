@@ -59,6 +59,7 @@ ENV_TEMPLATE_PLACEHOLDERS = frozenset(
         "your-langsmith-project",
         "your-minimax-api-key",
         "your-novita-api-key",
+        "your-nvidia-api-key",
         "your-openai-api-key",
         "your-openviking-user-api-key",
         "your-opper-api-key",

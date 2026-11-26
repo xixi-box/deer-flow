@@ -7,6 +7,7 @@ Run from repo root:
 from __future__ import annotations
 
 import pytest
+import setup_wizard
 import yaml
 from wizard import ui as wizard_ui
 from wizard.providers import LLM_PROVIDERS, SEARCH_PROVIDERS, WEB_FETCH_PROVIDERS, LLMProvider, with_thinking_support
@@ -486,6 +487,54 @@ class TestThinkingSupport:
 
 
 class TestLLMStep:
+    @pytest.mark.parametrize(
+        ("endpoint_override", "model_override", "expected_model", "supports_vision"),
+        [
+            pytest.param("", None, "nvidia/nemotron-3.5-super-vl-120b-a12b", True, id="hosted-default"),
+            pytest.param("http://nim.example/v1", 1, "nvidia/nemotron-3-super-120b-a12b", False, id="self-hosted"),
+        ],
+    )
+    def test_nvidia_nim_writes_config(self, monkeypatch, tmp_path, endpoint_override, model_override, expected_model, supports_vision):
+        hosted_endpoint = "https://integrate.api.nvidia.com/v1"
+        fake_key = "test-nvidia-key"
+        monkeypatch.setattr(setup_wizard, "__file__", str(tmp_path / "scripts" / "setup_wizard.py"))
+        monkeypatch.setattr(setup_wizard, "_is_interactive", lambda: True)
+        monkeypatch.setattr(wizard_ui, "_supports_arrow_menu", lambda: False)
+
+        def choose(prompt, options, default=None):
+            if prompt == "Enter choice":
+                matches = [index for index, option in enumerate(options) if option.startswith("NVIDIA NIM  (")]
+                assert len(matches) == 1, "Expected one NVIDIA NIM option in the provider menu"
+                return matches[0]
+            assert prompt == "Select model"
+            return default if model_override is None else model_override
+
+        answers = iter([str(len(SEARCH_PROVIDERS) + 1), str(len(WEB_FETCH_PROVIDERS) + 1), "", "", ""])
+
+        def answer(prompt):
+            if prompt.startswith("NVIDIA NIM base URL"):
+                assert f"[{hosted_endpoint}]" in prompt
+                return endpoint_override
+            return next(answers)
+
+        def enter_key(prompt):
+            assert prompt == "NVIDIA_API_KEY: "
+            return fake_key
+
+        monkeypatch.setattr(llm_step, "ask_choice", choose)
+        monkeypatch.setattr("builtins.input", answer)
+        monkeypatch.setattr("getpass.getpass", enter_key)
+
+        assert setup_wizard.main() == 0
+
+        model = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))["models"][0]
+        assert model["use"] == "langchain_openai:ChatOpenAI"
+        assert model["model"] == expected_model
+        assert model["base_url"] == (endpoint_override or hosted_endpoint)
+        assert model["supports_vision"] is supports_vision
+        assert model["api_key"] == "$NVIDIA_API_KEY"
+        assert read_env_file(tmp_path / ".env") == {"NVIDIA_API_KEY": fake_key}
+
     @pytest.mark.parametrize("override", [False, True])
     def test_rapid_mlx_keyless_config(self, monkeypatch, tmp_path, override):
         provider_index = next(i for i, p in enumerate(LLM_PROVIDERS) if p.name == "rapid_mlx")
