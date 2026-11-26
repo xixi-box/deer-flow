@@ -231,6 +231,11 @@ models:
 - A `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` handoff is drained on first use and the token is kept for the life of the process, so every `ClaudeChatModel` instance reuses it
 - On macOS, DeerFlow does not probe Keychain automatically. Use `scripts/export_claude_code_oauth.py` to export Claude Code auth explicitly when needed
 
+When the Claude or Codex provider handles retries, it prefers a valid
+`retry-after-ms` hint over `Retry-After`, which accepts seconds (including
+fractional values) or an HTTP date. Without a usable hint of up to 24 hours,
+the provider uses its local backoff schedule.
+
 To use OpenAI's `/v1/responses` endpoint with LangChain, keep using `langchain_openai:ChatOpenAI` and set:
 
 ```yaml
