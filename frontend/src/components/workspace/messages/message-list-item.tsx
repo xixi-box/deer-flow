@@ -1,4 +1,5 @@
 import type { Message } from "@langchain/langgraph-sdk";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   CheckIcon,
   Loader2Icon,
@@ -35,6 +36,7 @@ import {
   resolveArtifactURL,
   resolveMessageImageURL,
 } from "@/core/artifacts/utils";
+import { useAuth } from "@/core/auth/AuthProvider";
 import {
   type RetrievalSource,
   extractCitationSources,
@@ -54,7 +56,9 @@ import {
   parseSlashSkillReference,
   resolveSlashSkillDisplay,
 } from "@/core/skills";
+import { installSkill } from "@/core/skills/api";
 import { useSkills } from "@/core/skills/hooks";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { pathOfThread } from "@/core/threads/utils";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
@@ -464,10 +468,12 @@ function MessageContent_({
 
   const rawContent = extractContentFromMessage(message);
   const reasoningContent = extractReasoningContentFromMessage(message);
+  const structuredFiles = message.additional_kwargs?.files;
+  const hasStructuredFiles =
+    Array.isArray(structuredFiles) && structuredFiles.length > 0;
 
   const files = useMemo(() => {
-    const files = message.additional_kwargs?.files;
-    if (!Array.isArray(files) || files.length === 0) {
+    if (!hasStructuredFiles) {
       if (
         rawContent.includes("<current_uploads>") ||
         rawContent.includes("<uploaded_files>")
@@ -482,8 +488,8 @@ function MessageContent_({
       }
       return null;
     }
-    return files as FileInMessage[];
-  }, [message.additional_kwargs?.files, rawContent]);
+    return structuredFiles as FileInMessage[];
+  }, [hasStructuredFiles, structuredFiles, rawContent]);
   const referenceAttachments = useMemo(
     () =>
       readReferenceMessageContexts(message.additional_kwargs).map(
@@ -513,7 +519,11 @@ function MessageContent_({
 
   const filesList =
     files && files.length > 0 ? (
-      <RichFilesList files={files} threadId={threadId} />
+      <RichFilesList
+        files={files}
+        threadId={threadId}
+        allowSkillInstall={isHuman && hasStructuredFiles}
+      />
     ) : null;
 
   // Uploading state: mock AI message shown while files upload
@@ -736,21 +746,89 @@ function formatBytes(bytes: number): string {
 function RichFilesList({
   files,
   threadId,
+  allowSkillInstall,
 }: {
   files: FileInMessage[];
   threadId: string;
+  allowSkillInstall: boolean;
 }) {
   if (files.length === 0) return null;
   return (
     <div className="mb-2 flex flex-wrap justify-end gap-2">
-      {files.map((file, index) => (
-        <RichFileCard
-          key={`${file.filename}-${index}`}
-          file={file}
-          threadId={threadId}
-        />
-      ))}
+      {files.map((file, index) => {
+        const { filename, path, status } = file;
+        // Only a structured upload can supply an install target. The legacy
+        // text markers also render previews but can be typed into a message.
+        const canInstall =
+          allowSkillInstall &&
+          status !== "uploading" &&
+          filename.toLowerCase().endsWith(".skill") &&
+          path === `/mnt/user-data/uploads/${filename}` &&
+          !filename.includes("/") &&
+          !filename.includes("\\");
+        const key = `${threadId}:${path ?? filename}:${index}`;
+        if (!canInstall || isStaticWebsiteOnly()) {
+          return <RichFileCard key={key} file={file} threadId={threadId} />;
+        }
+        return (
+          <div key={key} className="flex min-w-0 flex-col items-end gap-1">
+            <RichFileCard file={file} threadId={threadId} />
+            <InstallSkillAttachment threadId={threadId} path={path} />
+          </div>
+        );
+      })}
     </div>
+  );
+}
+
+function InstallSkillAttachment({
+  threadId,
+  path,
+}: {
+  threadId: string;
+  path: string;
+}) {
+  const { t } = useI18n();
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+  const { mutate, isPending, data, error } = useMutation({
+    mutationFn: () => installSkill({ thread_id: threadId, path }),
+    retry: false,
+    onSuccess: (result) => {
+      if (result.success) {
+        void queryClient.invalidateQueries({ queryKey: ["skills"] });
+      }
+    },
+  });
+
+  if (user?.system_role !== "admin") return null;
+
+  const message = error?.message ?? data?.message;
+  return (
+    <>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        disabled={isPending || data?.success}
+        onClick={() => mutate()}
+      >
+        {isPending
+          ? t.settings.skills.installingArchive
+          : t.settings.skills.installFromFile}
+      </Button>
+      {(data ?? error) && (
+        <p
+          role={data?.success ? "status" : "alert"}
+          className={cn(
+            "max-w-64 text-sm break-words",
+            data?.success ? "text-muted-foreground" : "text-destructive",
+          )}
+        >
+          {message ?? t.settings.skills.installFailed}
+        </p>
+      )}
+    </>
   );
 }
 

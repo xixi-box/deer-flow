@@ -1,5 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
   cleanup,
@@ -13,6 +14,19 @@ import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { zhCN } from "@/core/i18n/locales/zh-CN";
 import * as messageUtils from "@/core/messages/utils";
+import { buildThreadSubmitMessages } from "@/core/threads/hooks";
+
+const attachmentContext = rs.hoisted(() => ({
+  role: "admin",
+  select: rs.fn(),
+  setOpen: rs.fn(),
+}));
+rs.mock("@/components/workspace/artifacts/context", () => ({
+  useArtifacts: () => attachmentContext,
+}));
+rs.mock("@/core/auth/AuthProvider", () => ({
+  useAuth: () => ({ user: { system_role: attachmentContext.role } }),
+}));
 
 // The unit under test is the row's copy-data memo, not message rendering.
 // Stubbing the markdown pipeline also removes its first-render suspension:
@@ -69,6 +83,130 @@ function renderRow(
 afterEach(cleanup);
 afterEach(() => {
   copyDataCalls.mockClear();
+});
+
+describe("MessageListItem Skill attachment", () => {
+  const file = {
+    filename: "demo_1.SKILL",
+    path: "/mnt/user-data/uploads/demo_1.SKILL",
+    size: 1024,
+    status: "uploaded",
+  } as const;
+  const installLabel = enUS.settings.skills.installFromFile;
+
+  function renderAttachment(
+    message = buildThreadSubmitMessages({
+      text: "Save this Skill",
+      humanMessageId: "human-upload",
+      filesForSubmit: [file],
+    })[0]!,
+  ) {
+    const queryClient = new QueryClient();
+    return render(
+      <QueryClientProvider client={queryClient}>
+        {withI18n(<MessageListItem message={message} threadId="thread-1" />)}
+      </QueryClientProvider>,
+    );
+  }
+
+  afterEach(() => {
+    attachmentContext.role = "admin";
+    attachmentContext.select.mockClear();
+    attachmentContext.setOpen.mockClear();
+  });
+
+  it("installs the original Skill attachment only after an explicit click", async () => {
+    const request = rs.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      Response.json({
+        success: true,
+        skill_name: "demo",
+        message: "Installed demo",
+      }),
+    );
+    try {
+      renderAttachment();
+      fireEvent.click(screen.getByRole("button", { name: /demo_1\.SKILL/ }));
+      expect(attachmentContext.select).toHaveBeenCalledWith(file.path);
+      expect(attachmentContext.setOpen).toHaveBeenCalledWith(true);
+      expect(request).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: installLabel }));
+      expect(await screen.findByRole("status")).toHaveProperty(
+        "textContent",
+        "Installed demo",
+      );
+      expect(request).toHaveBeenCalledTimes(1);
+      const [url, init] = request.mock.calls[0]!;
+      expect(url).toBe("/api/skills/install");
+      expect(init).toMatchObject({
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify({ thread_id: "thread-1", path: file.path }),
+      });
+      expect(attachmentContext.select).toHaveBeenCalledTimes(1);
+    } finally {
+      request.mockRestore();
+    }
+  });
+
+  it.each([
+    [400, { message: "Skill archive failed security review" }],
+    [403, "Admin privileges required"],
+    [409, "Skill already exists"],
+  ])(
+    "shows the installer response in chat for HTTP %s",
+    async (status, detail) => {
+      const request = rs
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(Response.json({ detail }, { status }));
+      try {
+        renderAttachment();
+        fireEvent.click(screen.getByRole("button", { name: installLabel }));
+        expect(await screen.findByRole("alert")).toHaveProperty(
+          "textContent",
+          typeof detail === "string" ? detail : detail.message,
+        );
+      } finally {
+        request.mockRestore();
+      }
+    },
+  );
+
+  it("keeps preview available to members without offering installation", () => {
+    attachmentContext.role = "user";
+    renderAttachment();
+    expect(screen.queryByRole("button", { name: installLabel })).toBeNull();
+    expect(screen.getByRole("button", { name: /demo_1\.SKILL/ })).toBeTruthy();
+  });
+
+  it("keeps legacy upload markers available for preview only", () => {
+    renderAttachment({
+      ...makeMessage("human"),
+      content: `<uploaded_files>\n- ${file.filename} (1 KB)\n  Path: ${file.path}\n</uploaded_files>`,
+    });
+    expect(screen.getByRole("button", { name: /demo_1\.SKILL/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: installLabel })).toBeNull();
+  });
+
+  it.each([
+    {
+      ...file,
+      filename: "notes.zip",
+      path: "/mnt/user-data/uploads/notes.zip",
+    },
+    { ...file, path: "/mnt/user-data/outputs/demo_1.SKILL" },
+    { ...file, path: undefined, status: "uploading" },
+  ] as const)(
+    "omits installation for ineligible attachment %j",
+    (candidate) => {
+      renderAttachment(
+        buildThreadSubmitMessages({
+          text: "Save this",
+          filesForSubmit: [candidate],
+        })[0],
+      );
+      expect(screen.queryByRole("button", { name: installLabel })).toBeNull();
+    },
+  );
 });
 
 describe("MessageListItem edit shortcuts during IME composition", () => {

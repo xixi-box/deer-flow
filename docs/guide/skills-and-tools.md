@@ -41,6 +41,11 @@ view. Built-in and user-created/imported skills are listed separately. The
 Community tab supports importing `.skill` archives into My skills.
 General preferences remain in Settings.
 
+Administrators can also attach a `.skill` archive to a chat message. After uploading
+it, select **Install .skill** on the attachment. DeerFlow installs the original
+archive with the same security review and name conflict checks as Capability
+Center imports. The result appears below the attachment.
+
 Failed skill requests retain their HTTP error status and a readable fallback
 when the server returns an unusable error body.
 

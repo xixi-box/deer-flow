@@ -87,15 +87,6 @@ def _make_skill_archive(tmp_path: Path, name: str, content: str | None = None) -
     return archive
 
 
-def _make_skill_archive_bytes(name: str, content: str | None = None) -> bytes:
-    buffer = BytesIO()
-    skill_content = content or _skill_content(name)
-    with zipfile.ZipFile(buffer, "w") as zf:
-        zf.writestr(f"{name}/SKILL.md", skill_content)
-        zf.writestr(f"{name}/references/guide.md", "# Guide\n")
-    return buffer.getvalue()
-
-
 def _user_custom_dir(base_dir: Path, user_id: str = "default") -> Path:
     """Helper to locate the per-user custom skills dir for test assertions."""
     return base_dir / "users" / user_id / "skills" / "custom"
@@ -309,7 +300,8 @@ async def test_bounded_skill_archive_stream_rejects_chunked_oversize(monkeypatch
         await anext(stream)
 
 
-def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_path):
+@pytest.mark.parametrize("install_from_chat", [True, False], ids=["chat-attachment", "direct-upload"])
+def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_path, install_from_chat):
     home = tmp_path / "home"
     skills_root = tmp_path / "skills"
     skills_root.mkdir()
@@ -352,28 +344,35 @@ def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_
     app.include_router(skills_router.router)
 
     thread_id = "thread-uploaded-skill"
-    archive_bytes = _make_skill_archive_bytes("uploaded-skill")
+    files = {
+        "SKILL.md": (_skill_content("uploaded-skill") + "\n## 使用说明\n").encode("utf-8"),
+        "scripts/example.py": b"print('hello')\n",
+        "references/nested/guide.md": b"# Guide\n",
+    }
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for path, content in files.items():
+            archive.writestr(f"uploaded-skill/{path}", content)
+    archive_part = ("uploaded-skill.skill", buffer.getvalue(), "application/octet-stream")
 
     with TestClient(app) as client:
-        upload_response = client.post(
-            f"/api/threads/{thread_id}/uploads",
-            files=[("files", ("uploaded-skill.skill", archive_bytes, "application/octet-stream"))],
-        )
-        assert upload_response.status_code == 200
-        uploaded_file = upload_response.json()["files"][0]
-        uploaded_path = Path(uploaded_file["path"])
-        assert uploaded_path.is_file()
-
-        install_response = client.post("/api/skills/install", json={"thread_id": thread_id, "path": uploaded_file["virtual_path"]})
+        if install_from_chat:
+            upload_response = client.post(f"/api/threads/{thread_id}/uploads", files={"files": archive_part})
+            assert upload_response.status_code == 200
+            uploaded_file = upload_response.json()["files"][0]
+            assert Path(uploaded_file["path"]).read_bytes() == archive_part[1]
+            install_response = client.post("/api/skills/install", json={"thread_id": thread_id, "path": uploaded_file["virtual_path"]})
+        else:
+            install_response = client.post("/api/skills/install/upload", files={"archive": archive_part})
 
     assert install_response.status_code == 200
     assert install_response.json()["skill_name"] == "uploaded-skill"
     installed_dir = _user_custom_dir(tmp_path, "default") / "uploaded-skill"
-    nested_dir = installed_dir / "references"
-    assert stat.S_IMODE(installed_dir.stat().st_mode) & 0o055 == 0o055
-    assert stat.S_IMODE(nested_dir.stat().st_mode) & 0o055 == 0o055
-    assert stat.S_IMODE((installed_dir / "SKILL.md").stat().st_mode) & 0o044 == 0o044
-    assert stat.S_IMODE((nested_dir / "guide.md").stat().st_mode) & 0o044 == 0o044
+    assert {path.relative_to(installed_dir).as_posix(): path.read_bytes() for path in installed_dir.rglob("*") if path.is_file()} == files
+    for directory in [installed_dir, installed_dir / "references", installed_dir / "references/nested", installed_dir / "scripts"]:
+        assert stat.S_IMODE(directory.stat().st_mode) & 0o055 == 0o055
+    for path in files:
+        assert stat.S_IMODE((installed_dir / path).stat().st_mode) & 0o044 == 0o044
     assert refresh_calls == [("refresh", "default")]
 
 
