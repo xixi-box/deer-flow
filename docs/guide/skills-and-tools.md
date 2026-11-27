@@ -460,6 +460,11 @@ uv run python -m deerflow.skills.review.cli ../skills/public/data-analysis --for
 
 Invalid YAML dates or timestamps in frontmatter produce a `structure.invalid-frontmatter` blocker in the review report. Quote a date-like metadata value if it is intended as literal text.
 
+Operators can enable **background skill review** in the skill-evolution example
+extension. It uses completed interactive runs to propose revisions to an existing
+custom skill for the conversation owner. Justified proposals go through the
+existing approval and host validation flow. See [background review configuration](../../examples/deerflow-extension-skill-evolution/README.md#review-completed-conversations-in-the-background).
+
 Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-waivers.v1.json`. Because only the trusted base manifest can suppress a finding, a file-changing pull request can be preauthorized safely by first merging a manifest-only change that lists the reviewed future full-file SHA-256 in `preapproved_file_sha256s`; the file change can then land in a later pull request.
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, SearXNG, and Serper search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.

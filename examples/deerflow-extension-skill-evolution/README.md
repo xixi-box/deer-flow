@@ -101,6 +101,45 @@ plugins:
 Without the grant the service fails to start with a `NOT_GRANTED` diagnostic;
 nothing else in the deployment changes.
 
+## Review completed conversations in the background
+
+Optionally add the following to the same plugin entry. Keep its existing
+evidence and skill mutation grants. Choose a target in `target_skills` that
+already exists as an enabled custom skill for the conversation owner.
+
+```yaml
+host_access:
+  model_invocation:
+    roles:
+      review: my-configured-model
+config:
+  background_review:
+    target_skill: example-skill
+    creation_nudge_interval: 10
+    model_role: review
+```
+
+The reviewer counts lead-agent model responses with tool calls across successful
+interactive runs in each thread. A response with parallel calls counts as one
+round. A direct `skill_manage` call resets the count and collected excerpts.
+After the threshold, the worker reads the owner's current skill and asks the
+granted model for a reusable correction. The model receives the skill and bounded
+excerpts of user, assistant, and tool text, so choose a provider approved to
+process that data. The default role is `default` if `model_role` is omitted.
+
+The foreground run only queues a notification. The worker waits for sealed run
+evidence and makes a single structured model call using the configured role.
+Candidates use the same recorded cases and owner-scoped staging as manual
+proposals. The proposal cites the triggering run and any earlier runs whose
+excerpts entered the review. A justified proposal appears in the proposals endpoint. Applying it
+still requires the owner's request and the host checks documented below.
+
+The worker tracks up to 100 owner/thread pairs in memory and keeps the most
+recent 16 text excerpts for each. Its bounded queue and counters reset on restart.
+An unavailable seal, a saturated queue, or a failed review can cause a run to
+be skipped. This prototype revises one configured existing skill and reads
+completed runs observed since startup.
+
 ## HTTP surface
 
 All routes are under `/api/extension-skill-evolution`:
@@ -151,8 +190,8 @@ double-commit is rejected.
 ## Scope and boundaries
 
 - **This is an example, not a production engine.** The evaluator is a
-  deterministic static checker; it has no live-model runs, metrics, or signal
-  collection.
+  deterministic static checker. The optional reviewer uses a model to draft
+  revisions from sealed run evidence.
 - [#6954](https://github.com/bytedance/deer-flow/discussions/6954) proposes a
   distributable evolution plugin package with its own snapshot/versioning
   design; this example stops at the merged #5645 contract and should be

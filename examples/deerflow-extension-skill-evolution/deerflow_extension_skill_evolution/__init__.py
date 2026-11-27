@@ -17,6 +17,7 @@ from typing import Any
 
 from deerflow_extension_api import ExtensionInstall, ExtensionRegistry, extension
 
+from deerflow_extension_skill_evolution.background_review import BackgroundReviewConfig, BackgroundSkillReview
 from deerflow_extension_skill_evolution.service import EvolutionService, build_router
 
 __all__ = ["install"]
@@ -39,6 +40,10 @@ def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     service = EvolutionService(cases_dir=Path(cases_dir) if cases_dir else _DEFAULT_CASES_DIR)
     registry.service(service)
     registry.routers((build_router(service),))
+    if (review_config := config.get("background_review")) is not None:
+        review = BackgroundSkillReview(BackgroundReviewConfig.model_validate(review_config), service)
+        registry.service(review)
+        registry.task_lifecycle(review)
 
 
 _entry_point: ExtensionInstall = install

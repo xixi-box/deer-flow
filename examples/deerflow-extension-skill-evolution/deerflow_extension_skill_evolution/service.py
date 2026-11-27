@@ -13,6 +13,7 @@ recorded regression case justifies the change".
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from typing import Any
 
 from deerflow_extension_api import (
     AssessmentRef,
+    AssetRevision,
     CompletedRunEvidenceReader,
     ExtensionPrincipal,
     ExtensionRuntimeDeps,
@@ -142,6 +144,8 @@ class EvolutionService:
         idempotency_key: str | None = None,
         cases: Sequence[Case] | None = None,
         expected_owner_id: str | None = None,
+        expected_revision: AssetRevision | None = None,
+        supporting_source_refs: tuple[str, ...] = (),
     ) -> ProposalRecord:
         """Stage a candidate, evaluate it against recorded cases, and record the verdict.
 
@@ -151,15 +155,18 @@ class EvolutionService:
 
         ``expected_owner_id`` binds the operation to a caller: when given, a
         skill owned by anyone else is refused *before* staging, so a contributed
-        route can never act on another user's skill.
+        route can never act on another user's skill. A supplied revision pins the
+        candidate to the exact baseline used to draft it.
         """
         mutations = self._require_mutations()
         recorded = tuple(cases) if cases is not None else self.cases()
 
         view = await mutations.read_skill(source_ref=source_ref, name=skill_name)
         self._check_owner(view.owner_id, expected_owner_id)
+        if expected_revision is not None and view.revision != expected_revision:
+            raise SkillEvolutionError("REVISION_CONFLICT", "the skill changed while the candidate was being drafted")
         proposal = await mutations.stage(
-            source_refs=(source_ref,),
+            source_refs=(source_ref, *supporting_source_refs),
             target_ref=view.target_ref,
             expected_revision=view.revision,
             content=candidate_content,
@@ -169,7 +176,7 @@ class EvolutionService:
         baseline = {item.path: item.content for item in bundle.baseline}
         candidate = {item.path: item.content for item in bundle.candidate}
 
-        evaluation: Evaluation = evaluate(recorded, baseline, candidate)
+        evaluation: Evaluation = await asyncio.to_thread(evaluate, recorded, baseline, candidate)
         report = evaluation.report(candidate_hash=proposal.candidate_hash)
         rid = report_id(report)
 

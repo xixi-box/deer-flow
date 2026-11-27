@@ -350,3 +350,87 @@ async def test_resolve_source_requires_evidence_grant(service):
     with pytest.raises(SkillEvolutionError) as exc:
         await service.resolve_source(thread_id="t", run_id="r")
     assert exc.value.code == "NO_EVIDENCE"
+
+
+async def test_background_review_counts_rounds_per_thread_and_resets_after_manual_edit(service):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from deerflow_extension_api import CompletedRunEvent, ExtensionData, ModelInvocationResult, TaskInfo, TaskOutcome, TaskStopDetail
+
+    from deerflow_extension_skill_evolution.background_review import BackgroundReviewConfig, BackgroundSkillReview
+
+    def response(index, *names, caller="lead_agent"):
+        return CompletedRunEvent(
+            event_type="llm.ai.response",
+            content_json=json.dumps({"type": "ai", "tool_calls": [{"id": str(i), "name": name} for i, name in enumerate(names)]}),
+            metadata_json=json.dumps({"caller": caller, "llm_call_index": index}),
+        )
+
+    class Evidence(FakeEvidence):
+        async def get_snapshot(self, *, thread_id, run_id, limits=EvidenceLimits()):
+            snapshot = await super().get_snapshot(thread_id=thread_id, run_id=run_id, limits=limits)
+            return replace(snapshot, snapshot_ref=run_id)
+
+        async def read_events(self, *, snapshot_ref, **kwargs):
+            items = (response(1, "convert", "inspect"), response(2, "convert", caller="subagent:helper"))
+            if snapshot_ref == "manual":
+                items = (response(1, "skill_manage"),)
+            message = CompletedRunEvent(
+                event_type="llm.human.input",
+                content_json=json.dumps({"type": "human", "content": snapshot_ref}),
+                metadata_json=json.dumps({"caller": "lead_agent"}),
+            )
+            return CompletedRunEventPage(items=(message, *items))
+
+    mutations = FakeMutationService()
+    model = AsyncMock()
+    model.invoke.side_effect = [RuntimeError("provider failed"), ModelInvocationResult(content="", structured_output={"candidate_content": FIXED_MAIN})]
+    deps = ExtensionRuntimeDeps(skill_mutations=mutations, completed_run_evidence=Evidence(), model_invoker=model)
+    reviewer = BackgroundSkillReview(BackgroundReviewConfig(target_skill=SKILL, creation_nudge_interval=2), service)
+    await service.start(deps)
+    await reviewer.start(deps)
+
+    async def complete(thread_id, run_id, *, kind="lead"):
+        info = TaskInfo(task_id=run_id, thread_id=thread_id, run_id=run_id, kind=kind, stop=TaskStopDetail(status="success"))
+        await reviewer.on_task_stop(ExtensionData("app"), ExtensionData("task"), info, TaskOutcome.COMPLETED)
+        await asyncio.wait_for(reviewer._pending.join(), 5)
+
+    try:
+        await complete("first", "parallel")
+        await complete("second", "other")
+        await complete("first", "manual")
+        await complete("first", "after-manual")
+        await complete("first", "subagent", kind="subagent")
+        model.invoke.assert_not_awaited()
+        assert not service.list_proposals()
+
+        await complete("first", "retry")
+        assert model.invoke.await_count == 1
+        assert not service.list_proposals()
+
+        await complete("second", "finish")
+        assert model.invoke.await_count == 2
+        [proposal] = service.list_proposals()
+        assert (proposal.owner_id, proposal.decision) == (OWNER, "justified")
+        model_input = json.loads(model.invoke.call_args.args[0].messages[1].content)
+        assert [entry["text"] for entry in model_input["conversation_excerpts"]] == ["other", "finish"]
+        staged = await mutations.get_proposal(proposal_id=proposal.proposal_id)
+        assert staged.source_refs == ("finish", "other")
+    finally:
+        await reviewer.stop()
+        await service.stop()
+
+
+async def test_propose_rejects_a_stale_draft_baseline(service):
+    mutations = FakeMutationService()
+    await _start(service, mutations)
+    source = await service.resolve_source(thread_id="t", run_id="r")
+    draft_base = await mutations.read_skill(source_ref=source, name=SKILL)
+    mutations._files["SKILL.md"] = (BASE_MAIN + "An intervening manual edit.\n").encode()
+
+    with pytest.raises(SkillEvolutionError) as exc:
+        await service.propose(skill_name=SKILL, candidate_content=FIXED_MAIN, source_ref=source, expected_revision=draft_base.revision)
+
+    assert exc.value.code == "REVISION_CONFLICT"
+    assert not mutations._proposals
