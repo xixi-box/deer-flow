@@ -192,6 +192,45 @@ def test_gateway_and_postgres_resolve_the_same_secret(settings: tuple[str, ...],
         assert secrets == []
 
 
+@pytest.mark.parametrize(
+    ("settings", "markers", "expected"),
+    [
+        ((), (), "pgdata"),
+        ((), (".",), "."),
+        ((), ("pgdata",), "pgdata"),
+        ((), (".", "pgdata"), "."),
+        (("postgresql.primary.persistence.enabled=false",), (), "pgdata"),
+    ],
+    ids=["fresh-pvc", "legacy-pvc", "restart", "legacy-takes-precedence", "emptydir"],
+)
+def test_bundled_postgres_selects_data_directory(settings: tuple[str, ...], markers: tuple[str, ...], expected: str, tmp_path: Path) -> None:
+    postgres = _container(_render_chart(*settings), "postgres")
+    mount = _named(postgres["volumeMounts"], "data")
+    assert mount == {"name": "data", "mountPath": "/var/lib/postgresql/data"}
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    for marker in markers:
+        directory = volume / marker
+        directory.mkdir(exist_ok=True)
+        (directory / "PG_VERSION").write_text("16\n", encoding="utf-8")
+
+    entrypoint = tmp_path / "docker-entrypoint.sh"
+    entrypoint.write_text('#!/bin/sh\nprintf "%s\\n" "$PGDATA" "$@"\n', encoding="utf-8", newline="\n")
+    entrypoint.chmod(0o755)
+    # Mirror the image defaults when Kubernetes leaves command or args unset.
+    command = postgres.get("command", ["docker-entrypoint.sh"]) + postgres.get("args", ["postgres"])
+    script = 'PATH="$(cd "$1" && pwd):$PATH"; export PATH; shift; exec "$@"'
+    result = subprocess.run(
+        [require_posix_sh(), "-c", script, "_", tmp_path.as_posix(), *command],
+        env={**os.environ, "PGDATA": volume.as_posix()},
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert result.stdout.splitlines() == [(volume / expected).as_posix(), "postgres"], "initdb needs a directory owned by the postgres user"
+
+
 # --- test_helm_extensions_config_writable ---
 
 RUNTIME_CONFIG_PATH = "/app/backend/.deer-flow/extensions-config/extensions_config.json"

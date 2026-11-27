@@ -35,6 +35,15 @@ spec:
         - name: postgres
           image: "{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              # Keep existing clusters at the volume root. On a fresh volume,
+              # initdb needs a directory that UID 999 can create and chmod.
+              if [ ! -s "$PGDATA/PG_VERSION" ]; then
+                export PGDATA="$PGDATA/pgdata"
+              fi
+              exec docker-entrypoint.sh postgres
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

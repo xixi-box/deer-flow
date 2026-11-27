@@ -14,6 +14,17 @@ Use the table below as a practical starting point when choosing how to run DeerF
 - Linux plus Docker is the recommended deployment target for a persistent server. macOS and Windows are best treated as development or evaluation environments.
 - If CPU or memory usage stays pinned, reduce concurrent runs first, then move to the next sizing tier.
 
+## Bundled PostgreSQL on Kubernetes
+
+On a fresh Helm install, the bundled PostgreSQL container creates its data
+directory at `/var/lib/postgresql/data/pgdata`, inside the mounted volume. The
+volume root must be writable by the PostgreSQL user (UID 999) so the container
+can create that directory. If the volume already has a non-empty `PG_VERSION`
+file at its root, the container continues to use the existing database there.
+
+Before rolling back to a chart that expects data at the volume root, back up
+any database initialized in `pgdata` and plan how the older chart will access it.
+
 ## Option 1: Docker (Recommended)
 
 Requires Docker Desktop / Docker Engine and **Docker Compose v2.24+**
