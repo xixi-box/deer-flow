@@ -15,7 +15,7 @@ Get the status:
 
 Quick port-forward to nginx (bypasses Ingress):
 
-  kubectl -n {{ include "deer-flow.namespace" . }} port-forward svc/nginx 2026:2026
+  kubectl -n {{ include "deer-flow.namespace" . }} port-forward svc/nginx 2026:http
   # then open http://localhost:2026
 
 {{- if .Values.ingress.enabled }}

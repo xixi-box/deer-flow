@@ -73,6 +73,26 @@ def _secret_ref(container: dict, env_name: str) -> dict:
     return _env(container)[env_name]["valueFrom"]["secretKeyRef"]
 
 
+# --- nginx Service port ---
+
+
+@pytest.mark.parametrize(("settings", "expected_port"), [((), 2026), (("nginx.service.port=8080",), 8080)], ids=["default", "custom"])
+def test_ingress_resolves_the_nginx_service_port(settings: tuple[str, ...], expected_port: int) -> None:
+    documents = _render_chart("ingress.enabled=true", *settings)
+    service = _by_kind(documents, "Service", "nginx")
+    ingress = _by_kind(documents, "Ingress", "deer-flow")
+    backend = ingress["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]
+    (service_port,) = service["spec"]["ports"]
+
+    assert service_port["port"] == expected_port
+    assert backend["name"] == service["metadata"]["name"]
+    assert backend["port"] in ({"name": service_port["name"]}, {"number": service_port["port"]})
+
+
+def test_nginx_port_forward_notes_resolve_the_service_port() -> None:
+    assert "port-forward svc/nginx 2026:http" in NOTES.read_text(encoding="utf-8")
+
+
 # --- test_helm_credentials_key ---
 
 _FERNET_KEY = re.compile(r"[A-Za-z0-9_-]{43}=")

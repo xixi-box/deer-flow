@@ -255,7 +255,7 @@ helm install deer-flow deploy/helm/deer-flow \
 
 ```bash
 kubectl -n deer-flow get pods
-kubectl -n deer-flow port-forward svc/nginx 2026:2026
+kubectl -n deer-flow port-forward svc/nginx 2026:http
 curl http://localhost:2026/health          # gateway liveness via nginx
 curl http://localhost:2026/health/ready    # readiness: database, checkpointer, stream_bridge, provisioner
 ```

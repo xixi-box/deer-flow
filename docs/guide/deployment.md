@@ -168,6 +168,8 @@ When fine-grained authorization is enabled, Live Browser connections require `th
 
 The bundled Docker, local and Helm nginx configs proxy Live Browser WebSocket upgrades with a 600-second read timeout for quiet streams. Helm uses nginx's default connection and send timeouts for the in-cluster Gateway. Any additional Ingress or reverse proxy must also allow WebSocket upgrades.
 
+The Helm Ingress and the chart's port-forward command use the nginx Service's named `http` port, so both work with a custom `nginx.service.port`. The port-forward command opens `http://localhost:2026`.
+
 Browser login uses `HttpOnly` session cookies. The login page offers a "keep me signed in" option that extends the browser session when the request is HTTPS (including trusted `X-Forwarded-Proto: https`) or localhost HTTP. The localhost exception uses the direct request `Host` and ignores forwarded host headers. Public HTTP deployments, including many temporary sandbox URLs, fall back to session cookies by default. DeerFlow never stores the password in browser storage; the UI may remember only the email address.
 
 If an authentication refresh fails during a temporary network outage, a visible
