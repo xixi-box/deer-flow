@@ -13,6 +13,7 @@ _MISSING = object()
 # encoding. Shared with :func:`mcp_scope_belongs_to_thread` so the two can
 # never drift apart.
 _V2_SCOPE_PREFIX = "v2:"
+_CREDENTIAL_SCOPE_PREFIX = "v3:"
 
 
 def is_valid_thread_incarnation(value: object) -> TypeGuard[str | None]:
@@ -25,21 +26,27 @@ def mcp_session_scope_key(
     user_id: str,
     thread_id: str,
     thread_incarnation: str | None = None,
+    credential_revision: str | None = None,
 ) -> str:
-    """Return the canonical user/thread/incarnation session key.
+    """Return the canonical session key, including the credential revision when supplied.
 
-    A legacy NULL incarnation retains the pre-activation scope so rolling
-    upgrades do not split an existing legacy session.
+    A legacy NULL incarnation without caller credentials retains the
+    pre-activation scope so rolling upgrades keep existing sessions.
     """
     if not is_valid_thread_incarnation(thread_incarnation):
         raise RuntimeError("MCP session scope requires a non-empty thread incarnation")
     scope = f"{user_id}:{thread_id}"
-    if thread_incarnation is None:
+    if thread_incarnation is None and credential_revision is None:
         return scope
     # A JSON tuple is an unambiguous, versioned encoding even when an opaque
     # user/thread id contains the delimiter used by the legacy scope.
-    return _V2_SCOPE_PREFIX + json.dumps(
-        [user_id, thread_id, thread_incarnation],
+    scope_parts = [user_id, thread_id, thread_incarnation]
+    prefix = _V2_SCOPE_PREFIX
+    if credential_revision is not None:
+        scope_parts.append(credential_revision)
+        prefix = _CREDENTIAL_SCOPE_PREFIX
+    return prefix + json.dumps(
+        scope_parts,
         ensure_ascii=True,
         separators=(",", ":"),
     )
@@ -48,12 +55,10 @@ def mcp_session_scope_key(
 def mcp_scope_belongs_to_thread(scope_key: str, *, user_id: str, thread_id: str) -> bool:
     """Return whether *scope_key* was minted for this user/thread identity.
 
-    Matches both encodings :func:`mcp_session_scope_key` can produce: the legacy
-    ``user:thread`` scope (NULL incarnation) and the versioned
-    ``v2:[user, thread, incarnation]`` scope. The incarnation is deliberately
-    *not* compared — a caller tearing down a whole thread has to invalidate every
-    generation of it, and the current generation cannot be read reliably at
-    teardown time (see ``MCPSessionPool.close_thread_scope``).
+    Matches the legacy ``user:thread`` scope, the versioned incarnation scope
+    and the credential-scoped encoding from :func:`mcp_session_scope_key`.
+    Teardown matches every incarnation and credential revision of the user
+    and thread (see ``MCPSessionPool.close_thread_scope``).
 
     The legacy branch is a prefix-free string compare, so a crafted ``user_id``
     containing ``:`` can collide with another owner's legacy key. That can only
@@ -62,13 +67,17 @@ def mcp_scope_belongs_to_thread(scope_key: str, *, user_id: str, thread_id: str)
     """
     if scope_key == f"{user_id}:{thread_id}":
         return True
-    if not scope_key.startswith(_V2_SCOPE_PREFIX):
+    if scope_key.startswith(_V2_SCOPE_PREFIX):
+        prefix, length = _V2_SCOPE_PREFIX, 3
+    elif scope_key.startswith(_CREDENTIAL_SCOPE_PREFIX):
+        prefix, length = _CREDENTIAL_SCOPE_PREFIX, 4
+    else:
         return False
     try:
-        decoded = json.loads(scope_key[len(_V2_SCOPE_PREFIX) :])
+        decoded = json.loads(scope_key[len(prefix) :])
     except ValueError:
         return False
-    return isinstance(decoded, list) and len(decoded) == 3 and decoded[0] == user_id and decoded[1] == thread_id
+    return isinstance(decoded, list) and len(decoded) == length and decoded[0] == user_id and decoded[1] == thread_id
 
 
 def runtime_thread_incarnation(runtime: Any | None) -> str | None:

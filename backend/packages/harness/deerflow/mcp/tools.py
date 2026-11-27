@@ -14,13 +14,13 @@ from typing import Any
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.tools import BaseTool, StructuredTool, ToolException
 from langgraph.config import get_config
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT, MCP_TMP_SUBDIR
-from deerflow.mcp.client import build_servers_config
+from deerflow.mcp.client import build_server_params, build_servers_config, stdio_server_fingerprint
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
@@ -32,6 +32,13 @@ from deerflow.mcp.session_pool import (
     call_pooled_session_tool,
     get_session_pool,
     normalized_connection_fingerprint,
+)
+from deerflow.mcp.stdio_credentials import (
+    StdioCredentialBinding,
+    create_credentialed_stdio_session,
+    credential_revision,
+    merge_stdio_credentials,
+    resolve_stdio_credentials,
 )
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
 from deerflow.mcp.tasks.runtime import (
@@ -723,6 +730,7 @@ def _make_session_pool_tool(
     *,
     pool: MCPSessionPool | None = None,
     binding: ServerBinding | None = None,
+    credential_binding: StdioCredentialBinding | None = None,
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
@@ -755,6 +763,7 @@ def _make_session_pool_tool(
         deerflow_runtime: Runtime | None = None,
         **arguments: Any,
     ) -> Any:
+        credentials = await credential_binding.resolve_for_call(deerflow_runtime) if credential_binding else None
         thread_id = _extract_thread_id(deerflow_runtime)
         user_id = resolve_runtime_user_id(deerflow_runtime)
         # Scope the pooled session by user *and* thread. Filesystem isolation is
@@ -765,6 +774,7 @@ def _make_session_pool_tool(
             user_id=user_id,
             thread_id=thread_id,
             thread_incarnation=thread_incarnation,
+            credential_revision=credential_binding.revision if credential_binding else None,
         )
         session_connection = dict(connection)
         # cwd/temp pinning and the workspace snapshot only matter for stdio
@@ -799,6 +809,9 @@ def _make_session_pool_tool(
             session_env.setdefault("TMP", str(tmp_dir))
             session_env.setdefault("TEMP", str(tmp_dir))
             session_connection["env"] = session_env
+        if credentials is not None:
+            session_connection["env"] = merge_stdio_credentials(session_env, credentials)
+            session_connection["credentialed_stdio"] = True
         if binding is not None:
             session_request = pool.get_session(
                 server_name,
@@ -818,37 +831,48 @@ def _make_session_pool_tool(
                 session_connection,
                 domain=effective_domain,
             )
-        if session_init_timeout is not None:
-            # Cancellation here is safe: MCPSessionPool.get_session owns the
-            # teardown of a session stuck mid-creation (it signals close and
-            # waits for the owner task's __aexit__ to run in its own task),
-            # so a hung server cannot leak a session or block the turn.
-            try:
-                session = await asyncio.wait_for(
-                    session_request,
-                    timeout=session_init_timeout,
-                )
-            except TimeoutError:
-                # Surface the timeout at the same log level as discovery
-                # timeouts: the tool call still fails with a TimeoutError the
-                # model can react to, but operators need the WARNING to
-                # diagnose tool-call failures caused by hung MCP sessions.
+        try:
+            if session_init_timeout is not None:
+                # The pool owns teardown if initialization is cancelled mid-spawn.
+                session_request = asyncio.wait_for(session_request, timeout=session_init_timeout)
+            session = await session_request
+        except TimeoutError:
+            if session_init_timeout is not None:
                 logger.warning(
                     "MCP session initialization for server '%s' timed out after %.1fs",
                     server_name,
                     session_init_timeout,
                 )
-                raise
-        else:
-            session = await session_request
+            raise
+        except Exception:
+            if credential_binding is not None:
+                raise ToolException(f"MCP session for server '{server_name}' could not start.") from None
+            raise
 
         domain_kwargs = {"domain": effective_domain} if effective_domain != "deployment" else {}
-
-        # Build common call_tool kwargs once — only add keys when needed so
-        # existing call-sites that assert on exact arguments are not affected.
         call_kwargs: dict[str, Any] = {}
         if tool_call_timeout:
             call_kwargs["read_timeout_seconds"] = timedelta(seconds=tool_call_timeout)
+
+        async def invoke(name: str, args: dict[str, Any], kwargs: dict[str, Any]) -> Any:
+            try:
+                result = await call_pooled_session_tool(
+                    session,
+                    pool,
+                    server_name=server_name,
+                    scope_key=scope_key,
+                    tool_name=name,
+                    arguments=args,
+                    call_kwargs=kwargs,
+                    **domain_kwargs,
+                )
+            except Exception:
+                if credential_binding is not None:
+                    raise ToolException(f"MCP tool call to server '{server_name}' failed.") from None
+                raise
+            if credential_binding is not None and getattr(result, "isError", False):
+                raise ToolException(f"MCP tool call to server '{server_name}' failed.")
+            return result
 
         if tool_interceptors:
             from langchain_mcp_adapters.interceptors import MCPToolCallRequest
@@ -862,37 +886,13 @@ def _make_session_pool_tool(
                         kwargs["meta"] = {"headers": dict(request.headers)}
                     else:
                         logger.warning("Ignoring MCP interceptor headers with unsupported type: %s", type(request.headers).__name__)
-                return await call_pooled_session_tool(
-                    session,
-                    pool,
-                    server_name=server_name,
-                    scope_key=scope_key,
-                    tool_name=request.name,
-                    arguments=request.args,
-                    call_kwargs=kwargs,
-                    **domain_kwargs,
-                )
+                return await invoke(request.name, request.args, kwargs)
 
             handler = compose_tool_interceptors(tool_interceptors, base_handler)
-
-            request = MCPToolCallRequest(
-                name=original_name,
-                args=arguments,
-                server_name=server_name,
-                runtime=deerflow_runtime,
-            )
+            request = MCPToolCallRequest(name=original_name, args=arguments, server_name=server_name, runtime=deerflow_runtime)
             call_tool_result = await handler(request)
         else:
-            call_tool_result = await call_pooled_session_tool(
-                session,
-                pool,
-                server_name=server_name,
-                scope_key=scope_key,
-                tool_name=original_name,
-                arguments=arguments,
-                call_kwargs=call_kwargs,
-                **domain_kwargs,
-            )
+            call_tool_result = await invoke(original_name, arguments, call_kwargs)
 
         # The after-call snapshot diff correlates generated filenames in text,
         # including the structured-result fallback. Both the diff and path resolution
@@ -1284,6 +1284,7 @@ def _wrap_discovered_server_tools(
     binding: ServerBinding | None,
     ownership_domain: MCPPoolDomain,
     connection_scope: str,
+    credential_binding: StdioCredentialBinding | None = None,
 ) -> ServerDiscoveryResult:
     """Validate, tag, wrap, and task-configure one successful discovery.
 
@@ -1324,6 +1325,7 @@ def _wrap_discovered_server_tools(
                     ownership_domain=ownership_domain,
                     pool=pool,
                     binding=binding,
+                    credential_binding=credential_binding,
                 )
             )
         else:
@@ -1351,10 +1353,10 @@ def _wrap_discovered_server_tools(
             from deerflow.approvals.policy import digest
             from deerflow.mcp.config_normalization import normalize_mcp_server_config
 
-            tool.metadata = {
-                **(tool.metadata or {}),
-                "deerflow_approval_binding": digest({"scope": connection_scope, "server": server_name, "config": normalize_mcp_server_config(server_cfg)}),
-            }
+            approval = digest({"scope": connection_scope, "server": server_name, "config": normalize_mcp_server_config(server_cfg)})
+            if credential_binding is not None:
+                approval = digest([approval, credential_binding.owner, credential_binding.revision])
+            tool.metadata = {**(tool.metadata or {}), "deerflow_approval_binding": approval}
         if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
             tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
 
@@ -1523,6 +1525,57 @@ async def _discover_and_wrap_prepared(
         len(groups),
     )
     return groups
+
+
+async def get_request_stdio_mcp_tools(config: ExtensionsConfig, owner: str, context: dict, selected: set[str] | None = None) -> list[BaseTool]:
+    """Discover each opted-in server as the caller, outside the shared cache."""
+    adapter = _load_mcp_adapter_symbols()
+    if adapter is None:
+        return []
+    _, load_tools = adapter
+    pool = get_session_pool()
+
+    async def discover(name: str, server: McpServerConfig) -> tuple[str, ServerDiscoveryResult | None]:
+        environment_mapping = server.env_from_context
+        assert environment_mapping is not None
+        try:
+            credentials = resolve_stdio_credentials(name, owner, environment_mapping, context)
+        except ToolException as exc:
+            logger.warning("%s", exc)
+            return name, None
+
+        try:
+            connection = build_server_params(name, server)
+            binding = pool.ensure_binding(name, stdio_server_fingerprint(server, connection), require_existing=True)
+            credential_binding = StdioCredentialBinding(name, server, owner, credential_revision(credentials))
+            launch = {**connection, "env": merge_stdio_credentials(connection.get("env", {}), credentials)}
+            timeout = _resolve_session_init_timeout(server)
+            async with asyncio.timeout(timeout):
+                async with create_credentialed_stdio_session(launch) as session:
+                    await session.initialize()
+                    tools = await load_tools(session, server_name=name, tool_name_prefix=server.tool_name_prefix)
+            view = config.model_copy(update={"mcp_servers": {name: server}})
+            interceptors = build_mcp_tool_interceptors(view, connection_scope="deployment")
+            return name, _wrap_discovered_server_tools(
+                config,
+                name,
+                connection,
+                _RawServerDiscovery(tools, interceptors),
+                tool_name_prefix=server.tool_name_prefix,
+                session_init_timeout=timeout,
+                pool=pool,
+                binding=binding,
+                ownership_domain="deployment",
+                connection_scope="deployment",
+                credential_binding=credential_binding,
+            )
+        except Exception as exc:
+            logger.warning("Skipping credentialed stdio MCP discovery for '%s' (%s)", name, type(exc).__name__)
+            return name, None
+
+    enabled = config.get_enabled_mcp_servers()
+    pairs = await asyncio.gather(*(discover(name, server) for name, server in enabled.items() if server.env_from_context is not None and (selected is None or name in selected)))
+    return _flatten_server_tool_groups(enabled, {name: group for name, group in pairs if group is not None})
 
 
 async def get_browser_mcp_tools(config: ExtensionsConfig, owner: str, selected: set[str] | None = None) -> list[BaseTool]:

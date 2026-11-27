@@ -292,6 +292,7 @@ class MCPSessionPool:
         fingerprint: str,
         *,
         domain: MCPPoolDomain = "deployment",
+        require_existing: bool = False,
     ) -> ServerBinding:
         """Resolve the discovery/task binding atomically without overwriting newer state."""
         binding_key = (domain, server_name)
@@ -301,6 +302,8 @@ class MCPSessionPool:
                 raise StaleMCPBindingError(server_name)
             current = self._bindings.get(binding_key)
             if current is None:
+                if require_existing:
+                    raise StaleMCPBindingError(server_name)
                 return self._install_binding_locked(binding_key, fingerprint)
             if current.fingerprint != fingerprint:
                 raise StaleMCPBindingError(server_name)
@@ -482,7 +485,13 @@ class MCPSessionPool:
         """Own one MCP session and fence promotion against binding replacement."""
         from langchain_mcp_adapters.sessions import create_session
 
-        cm = create_session(connection)
+        credentialed = connection.get("credentialed_stdio") is True
+        if credentialed:
+            from deerflow.mcp.stdio_credentials import create_credentialed_stdio_session
+
+            cm = create_credentialed_stdio_session(connection)
+        else:
+            cm = create_session(connection)
         try:
             session = await cm.__aenter__()
         except BaseException as error:
@@ -493,7 +502,7 @@ class MCPSessionPool:
                     logger.debug(
                         "Suppressing MCP session error for superseded binding '%s'",
                         expected_binding.server_name,
-                        exc_info=(type(error), error, error.__traceback__),
+                        exc_info=None if credentialed else (type(error), error, error.__traceback__),
                     )
                     ready.set_exception(StaleMCPBindingError(expected_binding.server_name))
             return
@@ -544,14 +553,14 @@ class MCPSessionPool:
                     logger.debug(
                         "Suppressing MCP session error for superseded binding '%s'",
                         expected_binding.server_name,
-                        exc_info=(type(error), error, error.__traceback__),
+                        exc_info=None if credentialed else (type(error), error, error.__traceback__),
                     )
                     ready.set_exception(StaleMCPBindingError(expected_binding.server_name))
         finally:
             try:
                 await cm.__aexit__(None, None, None)
             except Exception:
-                logger.warning("Error closing MCP session", exc_info=True)
+                logger.warning("Error closing MCP session", exc_info=not credentialed)
 
     async def get_session(
         self,

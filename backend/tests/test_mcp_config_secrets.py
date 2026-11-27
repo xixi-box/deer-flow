@@ -3357,3 +3357,27 @@ def test_validate_mcp_update_enforces_stdio_transport_alias(monkeypatch):
 
     assert exc_info.value.status_code == 400
     assert "custom-mcp-server" in exc_info.value.detail
+
+
+def test_env_from_context_survives_an_ordinary_server_edit():
+    mapping = {"GITHUB_TOKEN": "github_token"}
+    existing = McpServerConfigResponse(command="npx", env_from_context=mapping)
+    incoming = McpServerConfigResponse(command="npx", description="Updated")
+    masked = _mask_server_config(existing)
+    merged = _merge_preserving_secrets(incoming, masked)
+    assert masked.env_from_context == mapping
+    assert McpServerConfig.model_validate(merged.model_dump()).env_from_context == mapping
+    assert "env_from_context" not in incoming.model_dump()
+
+
+@pytest.mark.parametrize("transport", ["http", "sse"])
+def test_validate_mcp_update_rejects_env_from_context_on_remote_servers(transport):
+    request = McpConfigUpdateRequest(mcp_servers={"github": McpServerConfigResponse(type=transport, env_from_context={"GITHUB_TOKEN": "github_token"})})
+    with pytest.raises(HTTPException, match="requires stdio"):
+        _validate_mcp_update_request(request)
+
+
+def test_validate_mcp_update_rejects_code_injecting_env_from_context():
+    request = McpConfigUpdateRequest(mcp_servers={"github": McpServerConfigResponse(command="npx", env_from_context={"NODE_OPTIONS": "github_token"})})
+    with pytest.raises(HTTPException, match="cannot take startup environment variable"):
+        _validate_mcp_update_request(request)

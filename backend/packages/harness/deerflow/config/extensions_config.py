@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import re
 import stat
 import tempfile
 import threading
@@ -251,6 +252,22 @@ class McpUserOAuthConfig(BaseModel):
         return _browser_oauth_url(value, issuer=info.field_name == "issuer", callback=info.field_name == "redirect_uri")
 
 
+def validate_mcp_env_from_context(mapping: dict[str, str] | None) -> dict[str, str] | None:
+    """Validate an operator mapping from environment names to request secret keys."""
+    if mapping is None:
+        return None
+    if not mapping:
+        raise ValueError("env_from_context must map at least one environment variable")
+    seen = set()
+    for name, secret_key in mapping.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or name.upper() in seen:
+            raise ValueError("env_from_context requires unique environment variable names")
+        if not secret_key.strip() or secret_key != secret_key.strip() or any(ord(char) < 32 for char in secret_key):
+            raise ValueError("env_from_context requires non-blank secret field names")
+        seen.add(name.upper())
+    return mapping
+
+
 class McpServerConfig(BaseModel):
     """Configuration for a single MCP server."""
 
@@ -260,6 +277,8 @@ class McpServerConfig(BaseModel):
     args: list[str] = Field(default_factory=list, description="Arguments to pass to the command (for stdio type)")
     cwd: str | None = Field(default=None, description="Working directory for the MCP server process (for stdio type)")
     env: dict[str, str] = Field(default_factory=dict, description="Environment variables for the MCP server")
+    env_from_context: dict[str, str] | None = Field(default=None, exclude_if=lambda value: value is None, description="Map stdio environment names to required request secret fields")
+    _validate_env_from_context = field_validator("env_from_context")(validate_mcp_env_from_context)
     url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfig | None = Field(default=None, description="OAuth configuration (for sse or http type)")
@@ -311,6 +330,8 @@ class McpServerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_agent_credentials(self) -> "McpServerConfig":
+        if self.env_from_context is not None and (self.type != "stdio" or self.task_toolsets):
+            raise ValueError("env_from_context requires stdio without durable task toolsets")
         if self.uses_browser_oauth:
             if self.type != "http" or not self.url or self.task_toolsets:
                 raise ValueError("user_oauth requires Streamable HTTP without durable task toolsets")
@@ -654,7 +675,8 @@ class ExtensionsConfig(BaseModel):
             return env_value
 
         if isinstance(config, dict):
-            return {key: cls.resolve_env_variables(value) for key, value in config.items()}
+            # These values are field names, so a dollar prefix remains literal.
+            return {key: value if key == "env_from_context" else cls.resolve_env_variables(value) for key, value in config.items()}
 
         if isinstance(config, list):
             return [cls.resolve_env_variables(item) for item in config]
@@ -673,8 +695,8 @@ class ExtensionsConfig(BaseModel):
         return {name: config for name, config in self.mcp_servers.items() if config.enabled}
 
     def get_discoverable_mcp_servers(self) -> dict[str, McpServerConfig]:
-        """Return servers that can be discovered without a user's browser grant."""
-        return {name: server for name, server in self.get_enabled_mcp_servers().items() if not server.uses_browser_oauth}
+        """Return servers that can be discovered without caller credentials."""
+        return {name: server for name, server in self.get_enabled_mcp_servers().items() if not server.uses_browser_oauth and server.env_from_context is None}
 
     def is_skill_enabled(self, skill_name: str, skill_category: str) -> bool:
         """Check if a skill is enabled.

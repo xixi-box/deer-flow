@@ -28,6 +28,7 @@ from deerflow.config.extensions_config import (
     normalize_mcp_transport_alias,
     read_raw_extensions_config,
     reload_extensions_config,
+    validate_mcp_env_from_context,
     validate_raw_extensions_config,
 )
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
@@ -455,6 +456,8 @@ class McpServerConfigResponse(BaseModel):
     command: str | None = Field(default=None, description="Command to execute to start the MCP server (for stdio type)")
     args: list[str] = Field(default_factory=list, description="Arguments to pass to the command (for stdio type)")
     env: dict[str, str] = Field(default_factory=dict, description="Environment variables for the MCP server")
+    env_from_context: dict[str, str] | None = Field(default=None, exclude_if=lambda value: value is None, description="Map stdio environment names to required request secret fields")
+    _validate_env_from_context = field_validator("env_from_context")(validate_mcp_env_from_context)
     url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfigResponse | None = Field(default=None, description="OAuth configuration for MCP HTTP/SSE servers")
@@ -786,6 +789,12 @@ def _validate_mcp_update_request(
     allowed_commands = _allowed_stdio_commands() if enforce_execution_policy else set()
     for name, server in request.mcp_servers.items():
         transport_type = (server.type or "stdio").lower()
+        if server.env_from_context is not None:
+            if transport_type != "stdio" or server.task_toolsets:
+                raise HTTPException(422, "env_from_context requires stdio without durable task toolsets")
+            for env_name in server.env_from_context:
+                if env_name.upper() in _CODE_INJECTING_ENV_VARS:
+                    raise HTTPException(400, f"MCP server '{name}' cannot take startup environment variable '{env_name}' from run credentials")
         if transport_type != "stdio":
             continue
 
@@ -1110,6 +1119,8 @@ def _merge_preserving_secrets(
     # Changing an ordinary field must not silently remove credential enforcement.
     if "agent_auth" not in incoming.model_fields_set:
         update["agent_auth"] = existing.agent_auth
+    if "env_from_context" not in incoming.model_fields_set:
+        update["env_from_context"] = existing.env_from_context
     if preserve_omitted_fields and "headers_from_context" not in incoming.model_fields_set:
         update["headers_from_context"] = existing.headers_from_context
     if preserve_omitted_fields and "routing" not in incoming.model_fields_set:

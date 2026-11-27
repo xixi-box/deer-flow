@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import threading
 
 import pytest
 from langchain_core.tools import ToolException
@@ -11,8 +12,10 @@ from support.mcp_agent_auth import agent_auth_env as agent_auth_env
 from support.mcp_agent_auth import agent_mcp_transport as agent_mcp_transport
 
 from deerflow.config.app_config import get_app_config, reset_app_config
-from deerflow.config.extensions_config import reset_extensions_config
+from deerflow.config.extensions_config import ExtensionsConfig, reset_extensions_config
 from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, build_agent_auth_interceptor, capture_agent_authority, validate_task_agent_reference
+from deerflow.mcp.stdio_credentials import StdioCredentialBinding, credential_revision
+from deerflow.runtime.user_context import bind_authenticated_user
 from deerflow.utils.assembly_io import run_assembly
 
 
@@ -81,3 +84,28 @@ async def test_existing_standalone_tool_observes_enabled_protection_off_loop(age
     finally:
         reset_extensions_config()
         reset_app_config()
+
+
+@pytest.mark.asyncio
+async def test_stdio_credential_policy_reads_config_off_loop(tmp_path, monkeypatch):
+    path = tmp_path / "extensions.json"
+    raw = {"mcpServers": {"identity": {"command": "npx", "env_from_context": {"UPSTREAM_TOKEN": "identity_token"}}}}
+    await asyncio.to_thread(path.write_text, json.dumps(raw), encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(path))
+    server = ExtensionsConfig.model_validate(raw).mcp_servers["identity"]
+    credentials = {"UPSTREAM_TOKEN": "fixture-token"}
+    binding = StdioCredentialBinding("identity", server, "alice", credential_revision(credentials))
+    runtime = Runtime(context={"user_id": "alice", "secrets": {"identity_token": "fixture-token"}})
+    load = ExtensionsConfig.from_file
+    loop_thread = threading.get_ident()
+    read_threads = []
+
+    def read_config():
+        read_threads.append(threading.get_ident())
+        return load()
+
+    monkeypatch.setattr(ExtensionsConfig, "from_file", read_config)
+    with bind_authenticated_user("alice"):
+        assert await binding.resolve_for_call(runtime) == credentials
+    assert len(read_threads) == 1
+    assert read_threads[0] != loop_thread

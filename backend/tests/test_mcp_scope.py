@@ -35,6 +35,7 @@ def test_scope_rejects_invalid_incarnation():
         "u1:t1",
         'v2:["u1","t1","inc-1"]',
         'v2:["u1","t1","inc-2"]',
+        mcp_session_scope_key(user_id="u1", thread_id="t1", thread_incarnation="inc-2", credential_revision="test-revision"),
     ],
 )
 def test_belongs_to_thread_matches_legacy_and_every_incarnation(scope_key):

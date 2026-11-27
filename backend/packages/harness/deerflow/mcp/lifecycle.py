@@ -107,8 +107,7 @@ def parse_mcp_lifecycle(raw_config: Mapping[str, Any] | None) -> McpLifecycleLed
 
 def _stdio_fingerprints(config) -> dict[str, str]:
     """Return the enabled stdio server names mapped to connection fingerprints."""
-    from deerflow.mcp.client import build_server_params
-    from deerflow.mcp.session_pool import normalized_connection_fingerprint
+    from deerflow.mcp.client import build_server_params, stdio_server_fingerprint
 
     fingerprints: dict[str, str] = {}
     for server_name, server in config.get_enabled_mcp_servers().items():
@@ -125,7 +124,7 @@ def _stdio_fingerprints(config) -> dict[str, str]:
             continue
         if connection.get("transport", "stdio") != "stdio":
             continue
-        fingerprints[server_name] = normalized_connection_fingerprint(connection)
+        fingerprints[server_name] = stdio_server_fingerprint(server, connection)
     return fingerprints
 
 

@@ -1033,7 +1033,7 @@ def _assemble_lead_agent(
     # Resolve one authoritative identity for every user-scoped factory input.
     # Agent Server's reserved auth fields win over ordinary client-supplied
     # context/configurable values; the embedded Gateway path uses context.user_id.
-    from deerflow.runtime.user_context import resolve_config_user_id
+    from deerflow.runtime.user_context import get_authenticated_user_id, resolve_config_user_id
 
     resolved_user_id = resolve_config_user_id(config)
     if skill_storage is not None:
@@ -1400,6 +1400,8 @@ def _assemble_lead_agent(
     extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
     # Resolve the model once so tool guidance uses the same effective settings.
     chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides)
+    authenticated_user = get_authenticated_user_id()
+    has_authenticated_context = authenticated_user is not None and isinstance(runtime_context, dict) and runtime_context.get("user_id") == authenticated_user
     raw_tools = get_available_tools(
         model_name=model_name,
         groups=agent_config.tool_groups if agent_config else None,
@@ -1407,6 +1409,7 @@ def _assemble_lead_agent(
         subagent_enabled=subagent_enabled,
         include_conversation_reader=callable(cfg.get(CONVERSATION_READER_CONTEXT_KEY)) and not bool(cfg.get("is_subagent")),
         **({"mcp_browser_user": runtime_context[MCP_BROWSER_USER_CONTEXT_KEY]} if isinstance(runtime_context, Mapping) and runtime_context.get(MCP_BROWSER_USER_CONTEXT_KEY) and not cfg.get("is_subagent") else {}),
+        **({"mcp_run_context": runtime_context} if has_authenticated_context and not cfg.get("is_subagent") else {}),
         **({"scheduler_capability": scheduler_capability} if scheduler_capability is not None else {}),
         app_config=resolved_app_config,
         chat_model=chat_model,

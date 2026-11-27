@@ -266,6 +266,39 @@ prevents transport teardown and completion callbacks. Abandoned live-registry
 records can be removed by LRU eviction or explicit cleanup, but those operations
 cannot finish transport cleanup on a loop that has already closed.
 
+## Request-scoped credentials for shared stdio servers
+
+Operators can install one deployment stdio server and map selected environment
+variables to required fields in an authenticated lead-agent run's
+`config.context.secrets`. For example, add this field to an existing GitHub
+stdio entry in `extensions_config.json`, alongside its command and arguments:
+
+```json
+{
+  "env_from_context": {"GITHUB_TOKEN": "github_token"}
+}
+```
+
+Send the current GitHub token as `config.context.secrets.github_token` on each
+run that needs the server. The command, arguments and field mapping are
+operator-controlled. Map only variables that the operator-installed program
+uses for authentication. The caller's value replaces any configured
+`GITHUB_TOKEN` for that launch. Each mapped field is required, and a run with
+a missing field omits the server's tools without launching it.
+
+Tool discovery runs with the caller's credentials. Sessions can be reused for
+the same authenticated user, thread, credential values and event loop. To
+rotate a token in an existing chat, send its replacement on the next run. To
+remove it, omit the field on the next run. Other users' tool catalogs and
+sessions are independent. Request secrets stay in the live run and are excluded
+from stored run config. Old sessions are subject to normal pool eviction and
+thread teardown.
+
+This mode applies to authenticated Gateway lead-agent runs with live request
+secrets. Durable task toolsets, personal server definitions and ACP forwarding
+are outside this mode. Servers without the mapping continue to use the
+deployment environment and shared discovery.
+
 ## Server Timeouts
 
 Two independent settings bound stdio MCP servers and durable HTTP/SSE task

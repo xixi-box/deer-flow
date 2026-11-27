@@ -45,6 +45,8 @@ def _read_personal_config(user_id: str) -> dict:
 
 
 def _validate_personal_server(server: mcp.McpServerConfigResponse, *, admin: bool) -> None:
+    if server.env_from_context is not None:
+        raise HTTPException(422, "env_from_context is available only for deployment MCP servers")
     if server.agent_auth:
         raise HTTPException(422, "agent_auth is available only for deployment MCP servers")
     delegated = (server.model_extra or {}).get("user_oauth")

@@ -190,6 +190,8 @@ class McpTaskToolCaller:
         server_config = self._extensions_config.get_enabled_mcp_servers().get(server_name)
         if server_config is None:
             raise McpTaskConnectionUnavailableError(f"MCP task server {server_name!r} is missing or disabled in the startup configuration")
+        if server_config.env_from_context is not None:
+            raise McpTaskConnectionUnavailableError("This MCP server requires credentials from a live user run")
         connection = build_server_params(server_name, server_config)
         transport = connection.get("transport", "stdio")
         scope_key = mcp_session_scope_key(

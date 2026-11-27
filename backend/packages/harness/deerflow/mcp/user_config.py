@@ -63,6 +63,8 @@ def load_user_mcp_config(user_id: str) -> ExtensionsConfig:
     config = ExtensionsConfig.model_validate({"mcpServers": servers})
     if any(server.agent_auth or server.uses_browser_oauth for server in config.mcp_servers.values()):
         raise ValueError("agent_auth and user_oauth are available only for deployment MCP servers")
+    if any(server.env_from_context is not None for server in config.mcp_servers.values()):
+        raise ValueError("env_from_context is available only for deployment MCP servers")
     return config
 
 

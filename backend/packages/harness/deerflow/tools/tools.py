@@ -174,6 +174,7 @@ def get_available_tools(
     extensions=None,
     chat_model: BaseChatModel | None = None,
     mcp_browser_user: str | None = None,
+    mcp_run_context: dict | None = None,
 ) -> list[BaseTool]:
     """Get all available tools from config.
 
@@ -288,7 +289,10 @@ def get_available_tools(
                 # ValidationError message can embed secrets. Log the type only.
                 logger.error("Failed to load MCP extensions config (%s)", type(exc).__name__)
             else:
-                if extensions_config.get_discoverable_mcp_servers():
+                has_request_stdio = any(server.env_from_context is not None for server in extensions_config.get_enabled_mcp_servers().values())
+                # Establish the deployment binding baseline even when all its
+                # catalogs require caller credentials and the shared list is empty.
+                if has_request_stdio or extensions_config.get_discoverable_mcp_servers():
                     mcp_tools = get_cached_mcp_tools()
                     if mcp_tools:
                         logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
@@ -331,6 +335,15 @@ def get_available_tools(
 
                     selected = None if mcp_plugins is None else selected_mcp_server_names(mcp_plugins, extensions_config)
                     mcp_tools.extend(make_sync_tool_wrapper(get_browser_mcp_tools, "browser MCP discovery")(extensions_config, mcp_browser_user, selected))
+                if mcp_run_context is not None and has_request_stdio:
+                    from deerflow.capabilities.runtime import selected_mcp_server_names
+                    from deerflow.mcp.tools import get_request_stdio_mcp_tools
+                    from deerflow.runtime.user_context import get_authenticated_user_id
+
+                    owner = get_authenticated_user_id()
+                    if owner is not None and mcp_run_context.get("user_id") == owner:
+                        selected = None if mcp_plugins is None else selected_mcp_server_names(mcp_plugins, extensions_config)
+                        mcp_tools.extend(make_sync_tool_wrapper(get_request_stdio_mcp_tools, "credentialed stdio MCP discovery")(extensions_config, owner, mcp_run_context, selected))
                 extensions_config = extensions_config.model_copy(update={"mcp_servers": {**extensions_config.mcp_servers, **personal_config.mcp_servers}})
                 if mcp_plugins is not None:
                     from deerflow.capabilities.runtime import filter_mcp_plugins

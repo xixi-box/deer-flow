@@ -60,6 +60,18 @@ def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, 
     return params
 
 
+def stdio_server_fingerprint(config: McpServerConfig, connection: dict[str, Any]) -> str:
+    """Include the credential policy in the binding without including any caller's secret."""
+    from deerflow.mcp.session_pool import normalized_connection_fingerprint
+
+    static_fingerprint = normalized_connection_fingerprint(connection)
+    if config.env_from_context is None:
+        return static_fingerprint
+    from deerflow.approvals.policy import digest
+
+    return digest([static_fingerprint, config.env_from_context])
+
+
 def build_servers_config(extensions_config: ExtensionsConfig) -> dict[str, dict[str, Any]]:
     """Build servers configuration for MultiServerMCPClient.
 

@@ -230,6 +230,151 @@ class TestLeadAgentAssembly:
             registry.agent_assembly_observer(observer or _NoOpObserver())
         return registry.build()
 
+    def test_shared_stdio_mcp_uses_each_callers_credentials(self, monkeypatch, tmp_path, caplog, capfd):
+        import asyncio
+        import json
+        import sys
+        from types import SimpleNamespace
+
+        import pytest
+        from langchain_core.messages import AIMessage
+        from langchain_core.tools import ToolException
+        from langgraph.graph import START, MessagesState, StateGraph
+        from langgraph.prebuilt import ToolNode
+
+        from app.gateway.services import inject_authenticated_user_context
+        from deerflow.agents.lead_agent.agent import assemble_lead_agent
+        from deerflow.config.paths import Paths
+        from deerflow.mcp.cache import reset_mcp_tools_cache
+        from deerflow.mcp.session_pool import get_session_pool
+        from deerflow.runtime.runs.worker import _build_runtime_context, _install_runtime_context
+        from deerflow.runtime.user_context import bind_authenticated_user
+        from deerflow.utils.assembly_io import run_assembly
+
+        app_config = self._isolate_from_the_ambient_config(monkeypatch)
+        app_config.tool_search.enabled = False
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr("deerflow.mcp.tools.get_paths", lambda: Paths(tmp_path))
+        server = tmp_path / "identity.py"
+        server.write_text(
+            """
+import os
+import sys
+from pathlib import Path
+
+import anyio
+from mcp.server.fastmcp import FastMCP
+
+identity = {"fixture-a1": "alice", "${FIXTURE_LITERAL}": "alice_rotated", "fixture-b": "bob"}.get(os.getenv("UPSTREAM_TOKEN"), "shared")
+mcp = FastMCP("identity")
+calls = 0
+
+@mcp.tool()
+async def identity_check(overlap: bool = False) -> str:
+    global calls
+    if overlap:
+        rendezvous = Path(sys.argv[1])
+        (rendezvous / identity).touch()
+        with anyio.fail_after(10):
+            while not all((rendezvous / owner).exists() for owner in ("alice", "bob")):
+                await anyio.sleep(0.01)
+    calls += 1
+    return f"{identity}:{calls}"
+
+def identity_only() -> str:
+    return identity
+
+@mcp.tool()
+def fails() -> str:
+    print(os.environ["UPSTREAM_TOKEN"], file=sys.stderr)
+    raise ValueError(os.environ["UPSTREAM_TOKEN"])
+
+mcp.add_tool(identity_only, name=f"{identity}_only")
+mcp.run(transport="stdio")
+""",
+            encoding="utf-8",
+        )
+        rendezvous = tmp_path / "rendezvous"
+        rendezvous.mkdir()
+        monkeypatch.setenv("FIXTURE_LITERAL", "must-not-expand")
+        config_path = tmp_path / "extensions_config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "identity": {
+                            "transport": "stdio",
+                            "command": sys.executable,
+                            "args": [str(server), str(rendezvous)],
+                            "env": {"UPSTREAM_TOKEN": "shared-fallback"},
+                            "env_from_context": {"UPSTREAM_TOKEN": "identity_token"},
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
+
+        async def assemble(user, token):
+            secrets = {} if token is None else {"identity_token": token}
+            config = {"configurable": {"thread_id": "same-chat"}, "context": {"user_id": "spoofed", "secrets": secrets}}
+            inject_authenticated_user_context(config, SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id=user), auth_source="session")))
+            context = _build_runtime_context("same-chat", "run", config["context"], thread_incarnation="same-incarnation")
+            _install_runtime_context(config, context)
+            with bind_authenticated_user(user):
+                assembly = await run_assembly(assemble_lead_agent, config, app_config=app_config)
+            tools = {tool.name: tool for tool in assembly.graph["tools"] if tool.name.startswith("identity_")}
+            return tools, context
+
+        async def call(tool, context, user, **args):
+            graph = StateGraph(MessagesState, context_schema=dict)
+            graph.add_node("tools", ToolNode([tool], handle_tool_errors=False))
+            graph.add_edge(START, "tools")
+            message = AIMessage(content="", tool_calls=[{"name": tool.name, "args": args, "id": "call-1"}])
+            with bind_authenticated_user(user):
+                result = await graph.compile().ainvoke({"messages": [message]}, context=context)
+            return result["messages"][-1].content[0]["text"]
+
+        async def exercise():
+            try:
+                (alice, alice_runtime), (bob, bob_runtime) = await asyncio.gather(
+                    assemble("alice", "fixture-a1"),
+                    assemble("bob", "fixture-b"),
+                )
+                alice_tool = alice["identity_identity_check"]
+                bob_tool = bob["identity_identity_check"]
+                assert await asyncio.gather(call(alice_tool, alice_runtime, "alice"), call(bob_tool, bob_runtime, "bob")) == ["alice:1", "bob:1"]
+                assert set(alice) == {"identity_identity_check", "identity_alice_only", "identity_fails"}
+                assert set(bob) == {"identity_identity_check", "identity_bob_only", "identity_fails"}
+                assert await asyncio.gather(call(alice_tool, alice_runtime, "alice", overlap=True), call(bob_tool, bob_runtime, "bob", overlap=True)) == ["alice:2", "bob:2"]
+                with pytest.raises(ToolException, match="another user"):
+                    await call(alice_tool, bob_runtime, "bob")
+
+                rotated, rotated_runtime = await assemble("alice", "${FIXTURE_LITERAL}")
+                with pytest.raises(ToolException, match="changed"):
+                    await call(alice_tool, rotated_runtime, "alice")
+                assert await call(rotated["identity_identity_check"], rotated_runtime, "alice") == "alice_rotated:1"
+
+                missing, missing_runtime = await assemble("alice", None)
+                assert missing == {}
+                with pytest.raises(ToolException, match="identity_token"):
+                    await call(rotated["identity_identity_check"], missing_runtime, "alice")
+                assert await call(bob_tool, bob_runtime, "bob") == "bob:3"
+                with pytest.raises(ToolException, match="failed") as error:
+                    await call(bob["identity_fails"], bob_runtime, "bob")
+                assert "fixture-b" not in str(error.value)
+            finally:
+                await get_session_pool().close_all()
+
+        reset_mcp_tools_cache()
+        try:
+            asyncio.run(exercise())
+        finally:
+            reset_mcp_tools_cache()
+        captured = capfd.readouterr()
+        assert not any(secret in caplog.text + captured.err + captured.out for secret in ("fixture-a1", "${FIXTURE_LITERAL}", "fixture-b", "shared-fallback"))
+
     def test_assemble_returns_both_the_graph_and_a_descriptor(self, monkeypatch):
         from deerflow.agents.lead_agent.agent import LeadAgentAssembly, assemble_lead_agent
         from deerflow.extensions import bind_agent_build_extensions
